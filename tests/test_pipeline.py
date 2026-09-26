@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from formextract.evals.canned import client_for
+from formextract.model import InstanceStatus
+from formextract.pipeline import Pipeline, PipelineConfig
+from formextract.store import Store
+
+
+def test_pipeline_end_to_end_canned(spec_pdf, store):
+    pipe = Pipeline(store, client_for("spec_fragment_pdf"), PipelineConfig())
+    record = pipe.run(spec_pdf)
+
+    assert record.status is InstanceStatus.COMPLETE
+    assert record.errors == []
+    assert len(record.fields) == 4
+    assert len(record.llm_calls) == 1
+
+    by_canon = {f.canonical_name: f for f in record.fields}
+    assert by_canon["us_states_written"].value_normalized == "ALL"
+    assert by_canon["writes_in_canada"].value_normalized == "false"
+    assert by_canon["loss_runs_supported"].value_normalized == "true"
+
+    assert record.regions and record.anchors
+    assert len(record.anchors) == 5
+
+    # title and grid tokens are unconsumed text; glyph marks are excluded
+    residual_texts = [s.text for s in record.residuals]
+    assert "COMPLIANCE" in residual_texts
+    assert "AK" in residual_texts
+    assert all(t != "X" for t in residual_texts)
+
+    assert store.find_instance(record.idempotency_key).instance_id == record.instance_id
+    assert (store.instances_dir / f"{record.instance_id}.json").exists()
+
+
+def test_pipeline_idempotent(spec_pdf, store):
+    pipe = Pipeline(store, client_for("spec_fragment_pdf"), PipelineConfig())
+    first = pipe.run(spec_pdf)
+    second = pipe.run(spec_pdf)
+    assert first.instance_id == second.instance_id
+
+
+def test_pipeline_without_llm_is_partial_with_residuals(spec_xlsx):
+    store = Store(spec_xlsx.parent / "store")
+    pipe = Pipeline(store, None, PipelineConfig())
+    record = pipe.run(spec_xlsx)
+
+    assert record.fields == []
+    assert record.status is InstanceStatus.PARTIAL
+    assert record.residuals
+    assert "no fields resolved despite candidate hypotheses" in record.errors
+    assert record.anchors
+
+
+def test_pipeline_unsupported_source_fails(tmp_path, store):
+    bad = tmp_path / "form.csv"
+    bad.write_text("a,b\n1,2\n", encoding="utf-8")
+    record = Pipeline(store, None).run(bad)
+    assert record.status is InstanceStatus.FAILED
+    assert record.errors
+    assert "unsupported document type" in record.errors[0]
+
+
+def test_pipeline_batches_can_be_tagged(spec_pdf, store):
+    record = Pipeline(store, None).run(spec_pdf, batch_id="batch-1")
+    assert record.batch_id == "batch-1"

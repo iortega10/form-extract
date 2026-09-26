@@ -1,0 +1,13 @@
+.hearth/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.idea/
+*.egg-info/
+.formextract-store/
+
+# Real-world sample documents (business/personal data) -- kept locally for
+# testing, never committed. Manifests/golden JSON stay tracked; only the raw
+# source files are excluded.
+formextract/evals/manifests/fixtures/
