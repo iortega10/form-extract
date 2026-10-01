@@ -1,8 +1,8 @@
 # Generic form/document field extraction — design
 
 Goal: a Python package that extracts structured data from non-uniform
-document-based forms (canonical case: an Excel-workbook-based insurance
-"carrier compliance checklist," exported/shared as PDF), for batches where
+document-based forms (canonical case: an Excel-workbook-based
+compliance checklist, exported/shared as PDF), for batches where
 some forms share an identical template and others are one-offs. This is a
 design/build spec for hearth-cli, not a philosophy note — it should be
 buildable module-by-module from the phase list below.

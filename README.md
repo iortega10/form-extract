@@ -1,7 +1,7 @@
 # form-extract
 
-Extract structured fields from non-uniform form documents (checklists, carrier
-compliance forms, questionnaires) as PDF or XLSX. The pipeline is
+Extract structured fields from non-uniform form documents (checklists, compliance
+forms, questionnaires) as PDF or XLSX. The pipeline is
 **ingest → layout perception → (optional) LLM binding → instance record**:
 
 - **ingest** (`formextract/ingest/`) — format-adaptive parsing (pymupdf word

@@ -33,7 +33,7 @@ formextract-eval = "formextract.evals.harness:main"
 include = ["formextract*"]
 
 [tool.setuptools.package-data]
-# Only the synthetic manifest ships. real_samples.json and its PDF describe a real carrier form
+# Only the synthetic manifest ships. real_samples.json and its PDF describe a real third-party form
 # and stay out of every distribution.
 formextract = ["evals/manifests/spec_fragment.json"]
 
