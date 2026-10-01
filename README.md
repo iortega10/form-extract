@@ -147,3 +147,12 @@ formextract/
 tests/          # pytest suite (43 tests)
 docs/design/    # design notes
 ```
+
+## License
+
+Licensed under the **Apache License, Version 2.0**; see [`LICENSE`](LICENSE) and
+[`NOTICE`](NOTICE). Copyright 2026 Ivan Ortega.
+
+Note that the PDF ingester depends on **PyMuPDF**, which is licensed under the GNU AGPL-3.0
+(or a commercial license from Artifex). It is installed separately and not bundled, but check its
+terms before distributing a product that includes it.

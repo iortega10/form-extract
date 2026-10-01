@@ -1,0 +1,3 @@
+prune tests
+prune docs
+prune formextract/evals/manifests/fixtures

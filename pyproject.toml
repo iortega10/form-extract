@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +7,17 @@ name = "form-extract"
 version = "0.1.0"
 description = "Structured field extraction from non-uniform document forms"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+readme = "README.md"
+authors = [{name = "Ivan Ortega"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
     "openpyxl>=3.1",
     "pymupdf>=1.24",
@@ -22,7 +33,9 @@ formextract-eval = "formextract.evals.harness:main"
 include = ["formextract*"]
 
 [tool.setuptools.package-data]
-formextract = ["evals/manifests/*.json", "evals/manifests/fixtures/*.pdf"]
+# Only the synthetic manifest ships. real_samples.json and its PDF describe a real carrier form
+# and stay out of every distribution.
+formextract = ["evals/manifests/spec_fragment.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
