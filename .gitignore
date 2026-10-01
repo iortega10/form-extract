@@ -11,3 +11,9 @@ __pycache__/
 # testing, never committed. Manifests/golden JSON stay tracked; only the raw
 # source files are excluded.
 formextract/evals/manifests/fixtures/
+
+# Real-document material kept machine-local (never committed)
+local-private/
+formextract/evals/manifests/real_samples.json
+tests/test_real_samples.py
+docs/design/phase1-real-data-fixes.md
