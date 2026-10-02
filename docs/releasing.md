@@ -22,6 +22,6 @@ README say so.
 1. Set `version` in `pyproject.toml` to the exact version you will tag (`0.1.0rc1` for the dry
    run, `0.1.0` for the real one); the workflow refuses a tag that does not match.
 2. Dry run: tag `v0.1.0rc1` -> TestPyPI. In a clean virtualenv:
-   `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ form-extract`
+   `pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "form-extract==0.1.0rc1"`
    and run `formextract-eval`.
 3. Real release: set `0.1.0`, tag `v0.1.0` -> PyPI. Verify with a fresh `pip install form-extract`.
