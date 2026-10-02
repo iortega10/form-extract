@@ -23,6 +23,11 @@ dependencies = [
     "pymupdf>=1.24",
 ]
 
+[project.urls]
+Homepage = "https://github.com/iortega10/form-extract"
+Source = "https://github.com/iortega10/form-extract"
+Issues = "https://github.com/iortega10/form-extract/issues"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
