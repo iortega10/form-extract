@@ -18,9 +18,9 @@ def test_pipeline_end_to_end_canned(spec_pdf, store):
     assert len(record.llm_calls) == 1
 
     by_canon = {f.canonical_name: f for f in record.fields}
-    assert by_canon["us_states_written"].value_normalized == "ALL"
-    assert by_canon["writes_in_canada"].value_normalized == "false"
-    assert by_canon["loss_runs_supported"].value_normalized == "true"
+    assert by_canon["us_states_shipped"].value_normalized == "ALL"
+    assert by_canon["ships_to_canada"].value_normalized == "false"
+    assert by_canon["order_log_supported"].value_normalized == "true"
 
     assert record.regions and record.anchors
     assert len(record.anchors) == 5

@@ -6,48 +6,48 @@
       "synthetic": "spec_fragment_pdf",
       "golden": {
         "regions": [
-          {"label_hint": "carrier compliance checklist", "type": "header"},
-          {"label_hint": "which us states do they write in", "type": "field-row"},
+          {"label_hint": "vendor compliance checklist", "type": "header"},
+          {"label_hint": "which us states do they ship to", "type": "field-row"},
           {"label_hint": "if not all please check those that apply", "type": "field-row"},
-          {"label_hint": "do they write in canada", "type": "field-row"},
-          {"label_hint": "carrier license", "type": "field-row"},
-          {"label_hint": "loss runs", "type": "field-row"},
+          {"label_hint": "do they ship to canada", "type": "field-row"},
+          {"label_hint": "vendor status", "type": "field-row"},
+          {"label_hint": "order log", "type": "field-row"},
           {"label_hint": "ak", "type": "grid"}
         ],
         "anchors": [
-          {"normalized_text": "which us states do they write in", "occurrence_ordinal": 0},
+          {"normalized_text": "which us states do they ship to", "occurrence_ordinal": 0},
           {"normalized_text": "if not all please check those that apply", "occurrence_ordinal": 0},
-          {"normalized_text": "do they write in canada", "occurrence_ordinal": 0},
-          {"normalized_text": "carrier license", "occurrence_ordinal": 0},
-          {"normalized_text": "loss runs", "occurrence_ordinal": 0}
+          {"normalized_text": "do they ship to canada", "occurrence_ordinal": 0},
+          {"normalized_text": "vendor status", "occurrence_ordinal": 0},
+          {"normalized_text": "order log", "occurrence_ordinal": 0}
         ],
         "fields": [
           {
-            "label": "Which US states do they write in",
-            "canonical_name": "us_states_written",
+            "label": "Which US states do they ship to",
+            "canonical_name": "us_states_shipped",
             "control_type": "multi_select",
             "value": "ALL",
             "annotations": ["if not all please check those that apply"]
           },
           {
-            "label": "Do they write in Canada?",
-            "canonical_name": "writes_in_canada",
+            "label": "Do they ship to Canada?",
+            "canonical_name": "ships_to_canada",
             "control_type": "single_select",
             "value": "false"
           },
           {
-            "label": "Carrier License",
-            "canonical_name": "carrier_license",
+            "label": "Vendor Status",
+            "canonical_name": "vendor_status",
             "control_type": "single_select",
-            "value": "Non-Admitted",
-            "annotations": ["Confirm on NAIC website"]
+            "value": "Provisional",
+            "annotations": ["Confirm on vendor portal"]
           },
           {
-            "label": "Loss Runs",
-            "canonical_name": "loss_runs_supported",
+            "label": "Order Log",
+            "canonical_name": "order_log_supported",
             "control_type": "bool",
             "value": "true",
-            "annotations": ["Check if MGU is printing Loss runs from IMS directly"]
+            "annotations": ["Check if the vendor is exporting its order log directly"]
           }
         ]
       },
@@ -58,48 +58,48 @@
       "synthetic": "spec_fragment_xlsx",
       "golden": {
         "regions": [
-          {"label_hint": "carrier compliance checklist", "type": "header"},
-          {"label_hint": "which us states do they write in", "type": "field-row"},
+          {"label_hint": "vendor compliance checklist", "type": "header"},
+          {"label_hint": "which us states do they ship to", "type": "field-row"},
           {"label_hint": "if not all please check those that apply", "type": "field-row"},
-          {"label_hint": "do they write in canada", "type": "field-row"},
-          {"label_hint": "carrier license", "type": "field-row"},
-          {"label_hint": "loss runs", "type": "field-row"},
+          {"label_hint": "do they ship to canada", "type": "field-row"},
+          {"label_hint": "vendor status", "type": "field-row"},
+          {"label_hint": "order log", "type": "field-row"},
           {"label_hint": "ak", "type": "grid"}
         ],
         "anchors": [
-          {"normalized_text": "which us states do they write in", "occurrence_ordinal": 0},
+          {"normalized_text": "which us states do they ship to", "occurrence_ordinal": 0},
           {"normalized_text": "if not all please check those that apply", "occurrence_ordinal": 0},
-          {"normalized_text": "do they write in canada", "occurrence_ordinal": 0},
-          {"normalized_text": "carrier license", "occurrence_ordinal": 0},
-          {"normalized_text": "loss runs", "occurrence_ordinal": 0}
+          {"normalized_text": "do they ship to canada", "occurrence_ordinal": 0},
+          {"normalized_text": "vendor status", "occurrence_ordinal": 0},
+          {"normalized_text": "order log", "occurrence_ordinal": 0}
         ],
         "fields": [
           {
-            "label": "Which US states do they write in",
-            "canonical_name": "us_states_written",
+            "label": "Which US states do they ship to",
+            "canonical_name": "us_states_shipped",
             "control_type": "multi_select",
             "value": "ALL",
             "annotations": ["if not all please check those that apply"]
           },
           {
-            "label": "Do they write in Canada?",
-            "canonical_name": "writes_in_canada",
+            "label": "Do they ship to Canada?",
+            "canonical_name": "ships_to_canada",
             "control_type": "single_select",
             "value": "false"
           },
           {
-            "label": "Carrier License",
-            "canonical_name": "carrier_license",
+            "label": "Vendor Status",
+            "canonical_name": "vendor_status",
             "control_type": "single_select",
-            "value": "Non-Admitted",
-            "annotations": ["Confirm on NAIC website"]
+            "value": "Provisional",
+            "annotations": ["Confirm on vendor portal"]
           },
           {
-            "label": "Loss Runs",
-            "canonical_name": "loss_runs_supported",
+            "label": "Order Log",
+            "canonical_name": "order_log_supported",
             "control_type": "bool",
             "value": "true",
-            "annotations": ["Check if MGU is printing Loss runs from IMS directly"]
+            "annotations": ["Check if the vendor is exporting its order log directly"]
           }
         ]
       },

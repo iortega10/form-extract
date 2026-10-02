@@ -307,7 +307,7 @@ def _anchor_source_column(
     """Pick the column anchors are extracted from: the densest FIELD_ROW
     column, not the leftmost one.
 
-    Raw count, not fraction: on the real carrier PDF the three wrong columns
+    Raw count, not fraction: on the real-world PDF the three wrong columns
     are *entirely* FIELD_ROW (fraction 1.0, three-way tie) while the true
     label column has interleaved header/grid bands and would lose on
     fraction. Empirically on that document (page 0): c0=5, c1=4, c2=80 (of

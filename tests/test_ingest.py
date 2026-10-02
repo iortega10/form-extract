@@ -36,14 +36,14 @@ def test_xlsx_cells_sheets_and_merged(spec_xlsx):
     assert result.page_count == 1
 
     merged = next(e for e in result.elements if e.merged)
-    assert merged.text.startswith("X Support Loss Runs")
+    assert merged.text.startswith("X Support Order Log")
     assert merged.bbox.x0 == 5 and merged.bbox.x1 == 11
 
-    title = next(e for e in result.elements if e.text == "CARRIER COMPLIANCE CHECKLIST")
+    title = next(e for e in result.elements if e.text == "VENDOR COMPLIANCE CHECKLIST")
     assert title.size == 14.0
     assert title.sheet == "Checklist"
 
-    plain = next(e for e in result.elements if e.text == "Do they write in Canada?")
+    plain = next(e for e in result.elements if e.text == "Do they ship to Canada?")
     assert plain.merged is False
     assert (plain.bbox.x0, plain.bbox.x1) == (0, 1)
     assert (plain.bbox.y0, plain.bbox.y1) == (6, 7)

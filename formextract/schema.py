@@ -95,28 +95,28 @@ CANONICAL_FIELDS: dict[str, CanonicalField] = {
     cf.name: cf
     for cf in [
         CanonicalField(
-            name="us_states_written",
+            name="us_states_shipped",
             control_type=ControlType.MULTI_SELECT,
-            aliases=("which us states do they write in", "us states written", "states written in"),
+            aliases=("which us states do they ship to", "us states shipped to", "states shipped to"),
             normalizer_id="state_list",
-            description="US states the carrier writes in",
+            description="US states the vendor ships to",
         ),
         CanonicalField(
-            name="writes_in_canada",
+            name="ships_to_canada",
             control_type=ControlType.SINGLE_SELECT,
-            aliases=("do they write in canada", "writes in canada"),
+            aliases=("do they ship to canada", "ships to canada"),
             normalizer_id="yes_no",
         ),
         CanonicalField(
-            name="carrier_license",
+            name="vendor_status",
             control_type=ControlType.SINGLE_SELECT,
-            aliases=("carrier license",),
+            aliases=("vendor status",),
             normalizer_id="none",
         ),
         CanonicalField(
-            name="loss_runs_supported",
+            name="order_log_supported",
             control_type=ControlType.BOOL,
-            aliases=("loss runs", "support loss runs"),
+            aliases=("order log", "support order log"),
             normalizer_id="bool_check",
         ),
     ]

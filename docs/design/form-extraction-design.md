@@ -21,12 +21,12 @@ layer (not scanned) and is a rendered export of a multi-tab Excel workbook
 fragment:
 
 ```
-Which US states do they write in    X All
+Which US states do they ship to    X All
                   if not all please check those that apply   AK AL AR AZ CA CO CT DE FL GA
                                                                HI IA ID IL IN KS KY LA MA MD
-Do they write in Canada?    Yes   X No
-Carrier License    Admitted   X Non-Admitted   Confirm on NAIC website
-Loss Runs    X Support Loss Runs (Check if MGU is printing Loss runs from IMS directly)
+Do they ship to Canada?    Yes   X No
+Vendor Status    Approved   X Provisional   Confirm on vendor portal
+Order Log    X Support Order Log (Check if the vendor is exporting its order log directly)
 ```
 
 This fragment single-handedly breaks the naive "row = field, nearest-token
@@ -35,13 +35,13 @@ way it does:
 
 - `if not all please check those that apply` → a **sub-instruction**, not a
   label; its "value" is a **grid spanning two wrapped rows**.
-- `Do they write in Canada?` → the value is an **option set**
+- `Do they ship to Canada?` → the value is an **option set**
   (`{Yes, X No}`), not a single nearest token.
-- `Carrier License` → label + two options + a **trailing annotation**
-  (`Confirm on NAIC website`) — "nearest" is meaningless with three
+- `Vendor Status` → label + two options + a **trailing annotation**
+  (`Confirm on vendor portal`) — "nearest" is meaningless with three
   candidates after the label.
-- `Loss Runs` → the value is a **boolean checkbox** whose own label is
-  "Support Loss Runs," with a parenthetical annotation on the option, not
+- `Order Log` → the value is a **boolean checkbox** whose own label is
+  "Support Order Log," with a parenthetical annotation on the option, not
   on the field.
 - The same `X`-adjacent-to-short-token shape is **single-select** in
   `X No` and **multi-select** in the state grid — geometrically identical,
@@ -58,7 +58,7 @@ Prefer the most structured source available, in order:
 1. Native `.xlsx` via `openpyxl` when the source workbook exists at all
    (grid coordinates, merged cells, fill color, multi-sheet — fully
    deterministic). Note: validate against real intake before weighting
-   this as the primary path — carrier forms typically arrive as PDF, and
+   this as the primary path — vendor forms typically arrive as PDF, and
    xlsx may end up a minority backend rather than the default one.
 2. PDF with a text layer via `pdfplumber`/`PyMuPDF` word-level bounding
    boxes — still deterministic, geometric instead of grid-based.
@@ -143,10 +143,10 @@ Field model: a field is `{label, control_type: single_select | multi_select
 | bool | text, options[], answer(s), annotations[]}`, not a `(label,
 value)` pair. `Yes / X No` is `single_select{options:[Yes,No], answer:No}`;
 the state grid is `multi_select{options:[50 states], selected:[...]}`;
-`Loss Runs` is `bool{answer:true, label:"Support Loss Runs"}`. The
+`Order Log` is `bool{answer:true, label:"Support Order Log"}`. The
 `X All` control above the state grid is a select-all link into the grid
 and must be modeled as such, not emitted as a stray value. Annotations
-(`Confirm on NAIC website`, the MGU parenthetical) are quarantined
+(`Confirm on vendor portal`, the vendor-export parenthetical) are quarantined
 separately from answers so aggregation isn't contaminated by instruction
 text.
 
@@ -230,7 +230,7 @@ two more identified during review that the original plan omitted:
 
 For cross-form querying: **defer DuckDB until a recurring query need
 actually appears** (cross-form analytics, joining against the template
-registry, "which carriers left field X blank"). JSON-on-disk plus a query
+registry, "which vendors left field X blank"). JSON-on-disk plus a query
 script is sufficient at tens-to-hundreds of records, and DuckDB is
 rebuildable/cheap to add later — there's no cost to deferring it. When it
 is added:
@@ -444,7 +444,7 @@ ambiguous fields generally, not just in the fallback tier.
   mark means *unselected*. Resolve with group context; never hard-assume,
   flag when uncertain.
 - **Answer vs. instruction vs. annotation.** Parenthetical instructions
-  and "Confirm on NAIC website"-style notes must be normalized out into
+  and "Confirm on vendor portal"-style notes must be normalized out into
   `annotations[]`, not left contaminating `value`.
 - **LLM I/O is archived, not just logged** — pin model + params, store
   prompt/response references for reproducibility and audit.
@@ -460,7 +460,7 @@ row-banding heuristic, and the phase ordering) converged on a joint
 position, captured above. Residual **risks** to flag for the build,
 not disagreements:
 
-- **xlsx availability is unvalidated against real intake.** If carrier
+- **xlsx availability is unvalidated against real intake.** If vendor
   forms arrive almost entirely as PDF in practice, the xlsx backend is a
   nice-to-have that should not gate Phase 1 delivery.
 - **Template reuse's value is unmeasured.** The whole Phase 3 cost

@@ -7,11 +7,11 @@ from typing import Callable
 import pymupdf
 
 ROWS_PDF = [
-    (62.0, [(50.0, "CARRIER COMPLIANCE CHECKLIST", 14.0)]),
+    (62.0, [(50.0, "VENDOR COMPLIANCE CHECKLIST", 14.0)]),
     (
         100.0,
         [
-            (50.0, "Which US states do they write in", 10.0),
+            (50.0, "Which US states do they ship to", 10.0),
             (380.0, "X", 10.0),
             (394.0, "All", 10.0),
         ],
@@ -32,7 +32,7 @@ ROWS_PDF = [
     (
         160.0,
         [
-            (50.0, "Do they write in Canada?", 10.0),
+            (50.0, "Do they ship to Canada?", 10.0),
             (340.0, "Yes", 10.0),
             (376.0, "X", 10.0),
             (390.0, "No", 10.0),
@@ -41,19 +41,19 @@ ROWS_PDF = [
     (
         184.0,
         [
-            (50.0, "Carrier License", 10.0),
-            (300.0, "Admitted", 10.0),
+            (50.0, "Vendor Status", 10.0),
+            (300.0, "Approved", 10.0),
             (356.0, "X", 10.0),
-            (368.0, "Non-Admitted", 10.0),
-            (462.0, "Confirm on NAIC website", 9.0),
+            (368.0, "Provisional", 10.0),
+            (462.0, "Confirm on vendor portal", 9.0),
         ],
     ),
     (
         208.0,
         [
-            (50.0, "Loss Runs", 10.0),
+            (50.0, "Order Log", 10.0),
             (300.0, "X", 10.0),
-            (314.0, "Support Loss Runs (Check if MGU is printing Loss runs from IMS directly)", 8.0),
+            (314.0, "Support Order Log (Check if the vendor is exporting its order log directly)", 8.0),
         ],
     ),
 ]
@@ -86,10 +86,10 @@ def build_spec_fragment_xlsx(dest: Path) -> Path:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Checklist"
-    ws["A1"] = "CARRIER COMPLIANCE CHECKLIST"
+    ws["A1"] = "VENDOR COMPLIANCE CHECKLIST"
     ws["A1"].font = Font(bold=True, sz=14)
 
-    ws["A3"] = "Which US states do they write in"
+    ws["A3"] = "Which US states do they ship to"
     ws["F3"] = "X"
     ws["G3"] = "All"
 
@@ -97,20 +97,20 @@ def build_spec_fragment_xlsx(dest: Path) -> Path:
     ws["F4"] = _STATE_LINE_1
     ws["F5"] = _STATE_LINE_2
 
-    ws["A7"] = "Do they write in Canada?"
+    ws["A7"] = "Do they ship to Canada?"
     ws["F7"] = "Yes"
     ws["G7"] = "X"
     ws["H7"] = "No"
 
-    ws["A9"] = "Carrier License"
-    ws["F9"] = "Admitted"
+    ws["A9"] = "Vendor Status"
+    ws["F9"] = "Approved"
     ws["G9"] = "X"
-    ws["H9"] = "Non-Admitted"
-    ws["J9"] = "Confirm on NAIC website"
+    ws["H9"] = "Provisional"
+    ws["J9"] = "Confirm on vendor portal"
 
-    ws["A11"] = "Loss Runs"
+    ws["A11"] = "Order Log"
     ws.merge_cells("F11:K11")
-    ws["F11"] = "X Support Loss Runs (Check if MGU is printing Loss runs from IMS directly)"
+    ws["F11"] = "X Support Order Log (Check if the vendor is exporting its order log directly)"
 
     wb.save(str(path))
     wb.close()

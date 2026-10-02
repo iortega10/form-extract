@@ -8,7 +8,7 @@ from ..resolve import LLMResponse
 
 SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
     {
-        "label": "Which US states do they write in",
+        "label": "Which US states do they ship to",
         "control_type": "multi_select",
         "options": [{"text": "All", "selected": True}],
         "answer": ["ALL"],
@@ -16,7 +16,7 @@ SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
         "confidence": 0.93,
     },
     {
-        "label": "Do they write in Canada?",
+        "label": "Do they ship to Canada?",
         "control_type": "single_select",
         "options": [{"text": "Yes", "selected": False}, {"text": "No", "selected": True}],
         "answer": ["No"],
@@ -24,22 +24,22 @@ SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
         "confidence": 0.97,
     },
     {
-        "label": "Carrier License",
+        "label": "Vendor Status",
         "control_type": "single_select",
         "options": [
-            {"text": "Admitted", "selected": False},
-            {"text": "Non-Admitted", "selected": True},
+            {"text": "Approved", "selected": False},
+            {"text": "Provisional", "selected": True},
         ],
-        "answer": ["Non-Admitted"],
-        "annotations": ["Confirm on NAIC website"],
+        "answer": ["Provisional"],
+        "annotations": ["Confirm on vendor portal"],
         "confidence": 0.95,
     },
     {
-        "label": "Loss Runs",
+        "label": "Order Log",
         "control_type": "bool",
-        "options": [{"text": "Support Loss Runs", "selected": True}],
+        "options": [{"text": "Support Order Log", "selected": True}],
         "answer": ["true"],
-        "annotations": ["Check if MGU is printing Loss runs from IMS directly"],
+        "annotations": ["Check if the vendor is exporting its order log directly"],
         "confidence": 0.9,
     },
 ]

@@ -99,7 +99,7 @@ def build_prompt(chunk: ProjectionChunk) -> str:
         "- A '...All' control that selects an entire option grid belongs to that grid's "
         "field: answer includes \"ALL\" and the grid options are merged into that field.\n"
         "- Sub-instructions (e.g. 'if not all please check those that apply') and notes "
-        "(e.g. 'Confirm on NAIC website', parenthetical instructions) are annotations, "
+        "(e.g. 'Confirm on vendor portal', parenthetical instructions) are annotations, "
         "never answers. One field per user-visible question.\n"
         "- 'answer' holds the selected option texts (or the free text for text fields).\n"
         "- 'address' points at the anchor (left-column label text) and where the value "

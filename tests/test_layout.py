@@ -29,11 +29,11 @@ def test_pdf_anchors_exactly_densest_field_row_column(spec_pdf):
     layout = _layout(spec_pdf)
     anchors = [(a.normalized_text, a.occurrence_ordinal) for a in layout.anchors]
     assert anchors == [
-        ("which us states do they write in", 0),
+        ("which us states do they ship to", 0),
         ("if not all please check those that apply", 0),
-        ("do they write in canada", 0),
-        ("carrier license", 0),
-        ("loss runs", 0),
+        ("do they ship to canada", 0),
+        ("vendor status", 0),
+        ("order log", 0),
     ]
 
 
@@ -51,7 +51,7 @@ def test_pdf_hypotheses_ambiguous_controls(spec_pdf):
     guesses = [tuple(c for c in h.control_guesses) for h in layout.hypotheses]
 
     assert (ControlType.SINGLE_SELECT, ControlType.MULTI_SELECT) in guesses
-    # F1 same-row predicate: Loss Runs' tall annotation column is no longer a
+    # F1 same-row predicate: Order Log' tall annotation column is no longer a
     # value candidate, so its guess pair moved (bool, multi_select) ->
     # (bool, single_select) (expected fallout, phase1-real-data-fixes.md F1).
     assert (ControlType.BOOL, ControlType.SINGLE_SELECT) in guesses

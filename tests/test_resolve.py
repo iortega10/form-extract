@@ -45,7 +45,7 @@ def test_parse_drafts_from_canned_response():
     drafts = parse_drafts(spec_fragment_response())
     assert len(drafts) == 4
     labels = [d.label for d in drafts]
-    assert "Carrier License" in labels
+    assert "Vendor Status" in labels
     states = drafts[0]
     assert states.control_type is ControlType.MULTI_SELECT
     assert states.options[0].selected is True
@@ -78,16 +78,16 @@ def test_drafts_to_fields_canonicalizes_and_normalizes():
     fields = drafts_to_fields(drafts)
     by_canon = {f.canonical_name: f for f in fields}
     assert set(by_canon) == {
-        "us_states_written",
-        "writes_in_canada",
-        "carrier_license",
-        "loss_runs_supported",
+        "us_states_shipped",
+        "ships_to_canada",
+        "vendor_status",
+        "order_log_supported",
     }
-    assert by_canon["us_states_written"].value_normalized == "ALL"
-    assert by_canon["writes_in_canada"].value_normalized == "false"
-    assert by_canon["loss_runs_supported"].value_normalized == "true"
-    assert by_canon["carrier_license"].value_normalized == "Non-Admitted"
-    assert by_canon["loss_runs_supported"].control_type is ControlType.BOOL
+    assert by_canon["us_states_shipped"].value_normalized == "ALL"
+    assert by_canon["ships_to_canada"].value_normalized == "false"
+    assert by_canon["order_log_supported"].value_normalized == "true"
+    assert by_canon["vendor_status"].value_normalized == "Provisional"
+    assert by_canon["order_log_supported"].control_type is ControlType.BOOL
 
 
 def test_author_drafts_archives_calls(spec_pdf, store):
@@ -128,9 +128,9 @@ def test_author_drafts_fills_region_bbox_on_fields(spec_pdf, store):
         {
             "fields": [
                 {
-                    "label": "Loss Runs",
+                    "label": "Order Log",
                     "control_type": "bool",
-                    "options": [{"text": "Support Loss Runs", "selected": True}],
+                    "options": [{"text": "Support Order Log", "selected": True}],
                     "answer": ["true"],
                     "annotations": [],
                     "region_id": region.region_id,

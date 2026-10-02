@@ -7,8 +7,8 @@ from formextract.schema import canonical_field, canonical_name, normalize, norma
 
 
 def test_normalize_label():
-    assert normalize_label("  Non-Admitted,   AGO ") == "non admitted ago"
-    assert normalize_label("CARRIER (US)") == "carrier us"
+    assert normalize_label("  Pre-Approved,   AGO ") == "pre approved ago"
+    assert normalize_label("VENDOR (US)") == "vendor us"
 
 
 @pytest.mark.parametrize(
@@ -19,7 +19,7 @@ def test_normalize_label():
         ("bool_check", "x", "true"),
         ("bool_check", None, None),
         ("text", "  hello   world ", "hello world"),
-        ("none", "Non-Admitted", "Non-Admitted"),
+        ("none", "Provisional", "Provisional"),
         (None, "anything", "anything"),
     ],
 )
@@ -46,11 +46,11 @@ def test_unknown_normalizer_raises():
 
 
 def test_canonical_aliases():
-    assert canonical_name("Which US states do they write in") == "us_states_written"
-    assert canonical_name("do they write in canada?") == "writes_in_canada"
-    assert canonical_name("Loss Runs") == "loss_runs_supported"
+    assert canonical_name("Which US states do they ship to") == "us_states_shipped"
+    assert canonical_name("do they ship to canada?") == "ships_to_canada"
+    assert canonical_name("Order Log") == "order_log_supported"
     assert canonical_name("Some Novel Question") is None
-    cf = canonical_field("us_states_written")
+    cf = canonical_field("us_states_shipped")
     assert cf is not None
     assert cf.control_type is ControlType.MULTI_SELECT
     assert cf.normalizer_id == "state_list"
