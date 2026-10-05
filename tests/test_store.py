@@ -22,6 +22,7 @@ def _record(store_root_hash: str) -> InstanceRecord:
         source=SourceInfo(
             content_hash=store_root_hash, original_filename="a.pdf", mime="pdf", size=1
         ),
+        idempotency_key=f"{store_root_hash}:{PIPELINE_VERSION}",
     )
 
 

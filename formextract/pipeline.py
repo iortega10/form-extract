@@ -1,6 +1,7 @@
 """Orchestration: ingest → perception → (cold-path authoring) → instance record."""
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -17,11 +18,42 @@ from .model import (
     SourceInfo,
     Span,
 )
-from .resolve import LLMClient, author_drafts, drafts_to_fields, project_chunks
+from .resolve import (
+    LLMClient,
+    PROMPT_VERSION,
+    author_drafts,
+    drafts_to_fields,
+    project_chunks,
+)
 from .schema import SCHEMA_VERSION, normalize_label
-from .store import Store, content_hash
+from .store import Store, canonical_json, content_hash
 
 _MIME = {".xlsx": "xlsx", ".pdf": "pdf"}
+
+
+def compute_cache_key(
+    *,
+    content_hash: str,
+    pipeline_version: str,
+    schema_version: str,
+    prompt_version: str,
+    model: str,
+    params: dict[str, Any],
+) -> str:
+    params_hash = hashlib.sha256(
+        canonical_json(params).encode("utf-8")
+    ).hexdigest()
+    parts = "|".join(
+        [
+            content_hash,
+            pipeline_version,
+            schema_version,
+            prompt_version,
+            model or "none",
+            params_hash,
+        ]
+    )
+    return hashlib.sha256(parts.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -42,12 +74,23 @@ class Pipeline:
         self.llm_client = llm_client
         self.config = config or PipelineConfig()
 
-    def run(self, path: str | Path, batch_id: str | None = None) -> InstanceRecord:
+    def run(
+        self, path: str | Path, batch_id: str | None = None, *, force: bool = False
+    ) -> InstanceRecord:
         path = Path(path)
         chash = content_hash(path)
-        existing = self.store.find_instance(f"{chash}:{PIPELINE_VERSION}")
-        if existing is not None:
-            return existing
+        idempotency_key = compute_cache_key(
+            content_hash=chash,
+            pipeline_version=PIPELINE_VERSION,
+            schema_version=SCHEMA_VERSION,
+            prompt_version=PROMPT_VERSION,
+            model=self.config.model if self.llm_client is not None else "none",
+            params=self.config.params,
+        )
+        if not force:
+            existing = self.store.find_instance(idempotency_key)
+            if existing is not None:
+                return existing
 
         self.store.archive_raw(path, mime=_MIME.get(path.suffix.lower(), ""))
         errors: list[str] = []
@@ -91,7 +134,7 @@ class Pipeline:
             if self.llm_client is not None:
                 chunks = project_chunks(layout, elements, tabs)
                 try:
-                    drafts, calls = author_drafts(
+                    drafts, calls, resolve_errors = author_drafts(
                         chunks,
                         self.llm_client,
                         model=self.config.model,
@@ -104,6 +147,12 @@ class Pipeline:
                 except Exception as exc:  # noqa: BLE001
                     status = InstanceStatus.PARTIAL
                     errors.append(f"resolution failed: {exc}")
+                else:
+                    for re_ in resolve_errors:
+                        status = InstanceStatus.PARTIAL
+                        errors.append(
+                            f"chunk {re_.chunk_id} tab {re_.tab}: {re_.reason}"
+                        )
 
         if (
             status is InstanceStatus.COMPLETE
@@ -153,7 +202,8 @@ class Pipeline:
             signature=None,
             status=status,
             errors=errors,
+            idempotency_key=idempotency_key,
         )
-        saved, _ = self.store.save_instance(record)
+        saved, _ = self.store.save_instance(record, overwrite=force)
         return saved
 

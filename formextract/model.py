@@ -324,10 +324,7 @@ class InstanceRecord:
     signature: str | None = None
     status: InstanceStatus = InstanceStatus.COMPLETE
     errors: list[str] = field(default_factory=list)
-
-    @property
-    def idempotency_key(self) -> str:
-        return f"{self.source.content_hash}:{self.pipeline_version}"
+    idempotency_key: str = ""
 
 
 @dataclass

@@ -12,6 +12,7 @@ from pathlib import Path
 from .model import (
     BatchRecord,
     InstanceRecord,
+    InstanceStatus,
     LLMCall,
     RawArchiveRecord,
     TemplateRecord,
@@ -32,6 +33,10 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def canonical_json(data) -> str:
+    return json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
 def _read_json(path: Path, default):
     if not path.exists():
         return default
@@ -50,11 +55,14 @@ class Store:
         self.instances_dir = self.root / "instances"
         self.templates_dir = self.root / "templates"
         self.batches_dir = self.root / "batches"
+        self.runs_dir = self.root / "runs"
         self.llm_dir = self.root / "llm"
         for d in (self.raw_dir, self.instances_dir, self.templates_dir, self.batches_dir):
             d.mkdir(parents=True, exist_ok=True)
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
         (self.llm_dir / "prompts").mkdir(parents=True, exist_ok=True)
         (self.llm_dir / "responses").mkdir(parents=True, exist_ok=True)
+        (self.llm_dir / "calls").mkdir(parents=True, exist_ok=True)
 
     @property
     def _instance_index(self) -> Path:
@@ -90,12 +98,29 @@ class Store:
         instance_id = index.get(idempotency_key)
         if not instance_id:
             return None
-        return self.load_instance(instance_id)
+        record = self.load_instance(instance_id)
+        if record is None or record.status is not InstanceStatus.COMPLETE or record.errors:
+            return None
+        return record
 
-    def save_instance(self, record: InstanceRecord) -> tuple[InstanceRecord, bool]:
+    def record_run(self, record: InstanceRecord) -> InstanceRecord:
+        if not record.instance_id:
+            record.instance_id = uuid.uuid4().hex
+        if not record.run_id:
+            record.run_id = uuid.uuid4().hex
+        path = self.runs_dir / record.source.content_hash / f"{record.run_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(to_json(record), encoding="utf-8")
+        return record
+
+    def save_instance(
+        self, record: InstanceRecord, *, overwrite: bool = False
+    ) -> tuple[InstanceRecord, bool]:
+        if record.status is not InstanceStatus.COMPLETE:
+            return self.record_run(record), True
         index = _read_json(self._instance_index, {})
         key = record.idempotency_key
-        if key in index:
+        if key in index and not overwrite:
             existing = self.load_instance(index[key])
             if existing is not None:
                 return existing, False
@@ -136,6 +161,27 @@ class Store:
             return None
         return from_json(BatchRecord, path.read_text(encoding="utf-8"))
 
+    def _llm_call_key(
+        self, *, purpose: str, model: str, params: dict, prompt_hash: str
+    ) -> str:
+        return _sha256_text(
+            "|".join([prompt_hash, model, canonical_json(params), purpose])
+        )
+
+    def find_llm_call(
+        self, *, purpose: str, model: str, params: dict, prompt: str
+    ) -> LLMCall | None:
+        key = self._llm_call_key(
+            purpose=purpose,
+            model=model,
+            params=params,
+            prompt_hash=_sha256_text(prompt),
+        )
+        path = self.llm_dir / "calls" / f"{key}.json"
+        if not path.exists():
+            return None
+        return from_json(LLMCall, path.read_text(encoding="utf-8"))
+
     def archive_llm_call(
         self,
         *,
@@ -153,7 +199,7 @@ class Store:
         response_path = self.llm_dir / "responses" / f"{response_hash}.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
         response_path.write_text(response, encoding="utf-8")
-        return LLMCall(
+        call = LLMCall(
             call_id=uuid.uuid4().hex,
             purpose=purpose,
             model=model,
@@ -164,3 +210,12 @@ class Store:
             tokens=tokens,
             latency_ms=latency_ms,
         )
+        key = self._llm_call_key(
+            purpose=purpose,
+            model=model,
+            params=params,
+            prompt_hash=prompt_hash,
+        )
+        call_path = self.llm_dir / "calls" / f"{key}.json"
+        call_path.write_text(to_json(call), encoding="utf-8")
+        return call

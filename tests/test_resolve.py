@@ -101,7 +101,7 @@ def test_author_drafts_archives_calls(spec_pdf, store):
                 text=spec_fragment_response(), model=model, params=params, tokens=42
             )
 
-    drafts, calls = author_drafts(
+    drafts, calls, errors = author_drafts(
         chunks,
         Client(),
         model="m",
@@ -111,6 +111,7 @@ def test_author_drafts_archives_calls(spec_pdf, store):
     )
     assert len(drafts) == 4
     assert len(calls) == 1
+    assert errors == []
     assert (store.root / calls[0].prompt_ref).exists()
     assert (store.root / calls[0].response_ref).exists()
     assert all(d.provenance.llm_call_ref == calls[0].call_id for d in drafts)
@@ -144,7 +145,7 @@ def test_author_drafts_fills_region_bbox_on_fields(spec_pdf, store):
         def complete(self, prompt, *, model, params):
             return LLMResponse(text=response, model=model, params=params, tokens=10)
 
-    drafts, _ = author_drafts(
+    drafts, _, _ = author_drafts(
         chunks,
         Client(),
         model="m",
