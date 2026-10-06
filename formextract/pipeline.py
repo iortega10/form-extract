@@ -61,7 +61,7 @@ def _canonical_non_answer_columns(selectors) -> list[dict[str, str]]:
 def validate_non_answer_columns(selectors) -> None:
     """Raise ValueError for a malformed `non_answer_columns` selector.
 
-    Accepted shapes: ``"Z"`` (every tab) or ``{"tab": "CHC*", "column": "Z"}``.
+    Accepted shapes: ``"Z"`` (every tab) or ``{"tab": "Checklist*", "column": "Z"}``.
     """
     if selectors is None:
         return

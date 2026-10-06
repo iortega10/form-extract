@@ -188,7 +188,7 @@ never supplies or overrides a convention.
 
 Declare columns that hold reference/tag words (never answers) with
 `PipelineConfig(non_answer_columns=["Z"])` or
-`PipelineConfig(non_answer_columns=[{"tab": "CHC*", "column": "Z"}])`. Text in
+`PipelineConfig(non_answer_columns=[{"tab": "Checklist*", "column": "Z"}])`. Text in
 those columns is projected as annotations only and is never a marker or an
 option candidate.
 

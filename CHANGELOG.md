@@ -4,7 +4,10 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
-## Unreleased (0.4.0)
+## 0.4.0 (2026-10-06)
+
+This release also carries the 0.3.1 fix below: 0.3.1 was never tagged or published on its
+own.
 
 ### Added
 
@@ -34,7 +37,7 @@ single schema version bump per output-changing release.
   value is null with `ReviewReason.REPLAY_MISMATCH`). The exemplar map is per
   run and in memory only, never persisted.
 
-## 0.3.1 (unreleased)
+## 0.3.1 (not released separately; included in 0.4.0)
 
 ### Fixed
 
@@ -75,7 +78,7 @@ published on its own.
   candidate only to its right is auto-selected geometrically; every other
   selection is either declared or flagged for review.
 - **`non_answer_columns`.** `PipelineConfig(non_answer_columns=[...])` declares
-  spreadsheet columns (e.g. `"Z"` or `{"tab": "CHC*", "column": "Z"}`) whose
+  spreadsheet columns (e.g. `"Z"` or `{"tab": "Checklist*", "column": "Z"}`) whose
   text is projected as annotations only and is never a marker or option.
 
 ### Changed
