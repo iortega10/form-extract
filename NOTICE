@@ -9,8 +9,9 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 Runtime dependencies (installed separately, not bundled)
   openpyxl (MIT), https://openpyxl.readthedocs.io/
   PyMuPDF (GNU AGPL-3.0 or a commercial license from Artifex), https://pymupdf.readthedocs.io/
-    Used by formextract/ingest for PDF parsing. Its license terms apply to anything that
-    distributes or serves it; review them before redistributing a combined work.
+    Optional `[pdf]` extra, not installed by default. Used by formextract/ingest for PDF
+    parsing. Its license terms apply to anything that distributes or serves it; review them
+    before redistributing a combined work.
 
 Development dependencies (installed separately, not bundled)
   pytest (MIT)

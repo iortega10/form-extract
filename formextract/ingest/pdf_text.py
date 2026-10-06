@@ -5,12 +5,26 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pymupdf as fitz
-
 from ..model import BBox, Element
 
 
+class PdfBackendUnavailable(ImportError):
+    """The optional PDF backend (pymupdf) is not installed."""
+
+
+def _fitz():
+    try:
+        import pymupdf as fitz
+    except ImportError as exc:  # pragma: no cover - exercised via subprocess
+        raise PdfBackendUnavailable(
+            "PDF support requires the optional 'pdf' extra: "
+            "pip install 'form-extract[pdf]'"
+        ) from exc
+    return fitz
+
+
 def probe_text_layer(path: str | Path) -> bool:
+    fitz = _fitz()
     with fitz.open(str(path)) as doc:
         for page in doc:
             if page.get_text("words"):
@@ -19,6 +33,7 @@ def probe_text_layer(path: str | Path) -> bool:
 
 
 def _span_styles(page) -> list[tuple[tuple[float, float, float, float], str | None, float | None, int | None]]:
+    fitz = _fitz()
     styles = []
     data = page.get_text("dict", flags=fitz.TEXTFLAGS_TEXT)
     for block in data.get("blocks", []):
@@ -30,6 +45,7 @@ def _span_styles(page) -> list[tuple[tuple[float, float, float, float], str | No
 
 
 def ingest_pdf_text(path: str | Path) -> tuple[list[Element], int]:
+    fitz = _fitz()
     elements: list[Element] = []
     with fitz.open(str(path)) as doc:
         for page_index, page in enumerate(doc):

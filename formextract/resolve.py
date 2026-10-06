@@ -2,6 +2,7 @@
 Authors bindings; does not resolve values (that is replay's job)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -15,14 +16,17 @@ from .model import (
     BindingProvenance,
     ControlType,
     Element,
+    ElementRef,
     Field,
     LayoutResult,
     LLMCall,
     Option,
     Provenance,
     ProvenanceSource,
-    RelationalAddress,
     Region,
+    RegionType,
+    RelationalAddress,
+    ReviewReason,
 )
 from .schema import canonical_field, canonical_name, normalize, normalize_label
 
@@ -31,6 +35,7 @@ BINDING_OUTPUT_CONTRACT = """{"fields": [
    "options": [{"text": str, "selected": bool}],
    "answer": [str], "annotations": [str],
    "region_id": str,
+   "source_elements": [{"region_id": str, "band_id": int, "segment_index": int}],
    "address": {"anchor_text": str, "column": int, "row_band": int, "offset_right": int},
    "confidence": number}]}"""
 
@@ -89,7 +94,10 @@ def project_chunks(
                 texts = [
                     by_id[eid].text for eid in bands[band_id] if eid in by_id
                 ]
-                lines.append(f"- band {band_id}: " + " | ".join(texts))
+                lines.append(
+                    f"- band {band_id}: "
+                    + " | ".join(f"{i}={t}" for i, t in enumerate(texts))
+                )
             lines.append("")
         chunks.append(ProjectionChunk(key=tab, text="\n".join(lines).strip()))
     if not chunks and elements:
@@ -118,6 +126,9 @@ def build_prompt(chunk: ProjectionChunk) -> str:
         "- 'address' points at the anchor (left-column label text) and where the value "
         "lives relative to it: column index, band index within that column, and how many "
         "text blocks right of the anchor.\n"
+        "- 'source_elements' lists the projection segments this field is built from: "
+        "for each label/option/mark element, give its region_id, band_id and the "
+        "segment index shown as the `i=` prefix on that band line.\n"
         "- 'confidence' is your calibrated probability that the grouping is right.\n\n"
         f"Layout projection for `{chunk.key}`:\n{chunk.text}"
     )
@@ -177,6 +188,14 @@ def _parse_one_draft(item: dict, now: str) -> BindingDraft:
             row_band=a.get("row_band"),
             offset_right=int(a.get("offset_right", 0)),
         )
+    source_refs = [
+        ElementRef(
+            region_id=str(ref.get("region_id", "")),
+            band_id=int(ref["band_id"]),
+            segment_index=int(ref["segment_index"]),
+        )
+        for ref in item.get("source_elements", [])
+    ]
     return BindingDraft(
         draft_id=f"d-{uuid.uuid4().hex[:12]}",
         label=item["label"],
@@ -187,6 +206,7 @@ def _parse_one_draft(item: dict, now: str) -> BindingDraft:
         answers=list(item.get("answer", [])),
         annotations=list(item.get("annotations", [])),
         region_id=item.get("region_id"),
+        source_refs=source_refs,
         address=address,
         confidence=item.get("confidence"),
         provenance=BindingProvenance(
@@ -259,7 +279,10 @@ def author_drafts(
             try:
                 parse_drafts_with_errors(candidate)
             except ValueError:
-                pass  # unparseable cached responses must be re-spent
+                # A cached unparseable original goes straight to the repair
+                # prompt; returning it here lets the caller skip re-spending
+                # the original and only pay for the repair call.
+                return candidate, [cached], None
             else:
                 return candidate, [cached], None
 
@@ -339,43 +362,164 @@ def author_drafts(
     return drafts, calls, errors
 
 
-def drafts_to_fields(drafts: list[BindingDraft]) -> list[Field]:
-    fields: list[Field] = []
-    for draft in drafts:
-        cf = canonical_field(canonical_name(draft.label)) if canonical_name(draft.label) else None
-        if cf is None:
-            normalizer = "text" if draft.control_type is ControlType.TEXT else "none"
-            canonical = None
-        else:
-            normalizer = cf.normalizer_id
-            canonical = cf.name
-        selected = [o.text for o in draft.options if o.selected]
-        if draft.control_type is ControlType.TEXT:
-            value_raw = draft.answers[0] if draft.answers else None
-        elif selected:
-            value_raw = ", ".join(selected)
-        else:
-            value_raw = ", ".join(draft.answers) or None
-        value_normalized = normalize(normalizer, value_raw, draft.options)
-        fields.append(
-            Field(
-                label_text=draft.label,
-                control_type=draft.control_type,
-                bbox=draft.bbox,
-                options=draft.options,
-                answers=draft.answers,
-                annotations=draft.annotations,
-                region_ref=draft.region_id,
-                canonical_name=canonical,
-                value_raw=value_raw,
-                value_normalized=value_normalized,
-                normalizer_id=normalizer,
-                provenance=Provenance(
-                    source=ProvenanceSource.LLM,
-                    binding_id=draft.draft_id,
-                    llm_confidence=draft.confidence,
-                ),
+def _anchor_band_id(draft: BindingDraft, region_id: str | None) -> int | None:
+    for ref in draft.source_refs:
+        if ref.region_id == region_id:
+            return ref.band_id
+    return None
+
+
+def _anchor_sort_key(draft: BindingDraft, region_id: str | None) -> int:
+    anchor = _anchor_band_id(draft, region_id)
+    return anchor if anchor is not None else 10**9
+
+
+def _field_id(
+    page: int, column: int, region_id: str | None, anchor_norm: str, ordinal: int
+) -> str:
+    raw = "|".join([str(page), str(column), region_id or "", anchor_norm, str(ordinal)])
+    return "f-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _section_path(
+    region: Region | None,
+    layout: LayoutResult | None,
+    elements_by_id: dict[str, Element],
+) -> list[str]:
+    """Header regions above `region` on the same page, top-to-bottom."""
+    if region is None or layout is None:
+        return []
+    headers: list[tuple[float, float, str]] = []
+    for other in layout.regions:
+        if other.type is not RegionType.HEADER:
+            continue
+        if other.bbox.page != region.bbox.page:
+            continue
+        if other.bbox.y1 > region.bbox.y0:
+            continue
+        texts = [
+            elements_by_id[eid].text
+            for eid in other.element_ids
+            if eid in elements_by_id
+        ]
+        if texts:
+            headers.append(
+                (other.bbox.y0, other.bbox.x0, normalize_label(" ".join(texts)))
             )
-        )
+    headers.sort(key=lambda item: (item[0], item[1]))
+    return [text for _, _, text in headers]
+
+
+def drafts_to_fields(
+    drafts: list[BindingDraft],
+    *,
+    layout: LayoutResult | None = None,
+    elements_by_id: dict[str, Element] | None = None,
+    tabs: list[str] | None = None,
+) -> list[Field]:
+    elements_by_id = elements_by_id or {}
+    regions = layout.regions if layout else []
+    region_by_id = {r.region_id: r for r in regions}
+
+    by_region: dict[str | None, list[BindingDraft]] = {}
+    for draft in drafts:
+        by_region.setdefault(draft.region_id, []).append(draft)
+
+    fields: list[Field] = []
+    ordinal_by_region: dict[str | None, int] = {}
+    for region_id, group in by_region.items():
+        group.sort(key=lambda d: _anchor_sort_key(d, region_id))
+        for draft in group:
+            region = region_by_id.get(region_id) if region_id is not None else None
+            page = region.bbox.page if region else 0
+            column = region.column if region else -1
+            ordinal = ordinal_by_region.get(region_id, 0)
+            ordinal_by_region[region_id] = ordinal + 1
+
+            canon = canonical_name(draft.label)
+            cf = canonical_field(canon) if canon else None
+            if cf is None:
+                normalizer = "text" if draft.control_type is ControlType.TEXT else "none"
+                canonical = None
+            else:
+                normalizer = cf.normalizer_id
+                canonical = cf.name
+            selected = [o.text for o in draft.options if o.selected]
+            if draft.control_type is ControlType.TEXT:
+                value_raw = draft.answers[0] if draft.answers else None
+            elif selected:
+                value_raw = ", ".join(selected)
+            else:
+                value_raw = ", ".join(draft.answers) or None
+            value_normalized = normalize(normalizer, value_raw, draft.options)
+
+            source_elements: list[str] = []
+            unresolved: list[str] = []
+            for ref in draft.source_refs:
+                ref_region = region_by_id.get(ref.region_id)
+                band_key = (
+                    ref_region.bbox.page * 1000 + ref_region.column
+                    if ref_region
+                    else None
+                )
+                bands = layout.bands if layout else {}
+                band = (
+                    bands.get(band_key)
+                    if band_key is not None and band_key in bands
+                    else None
+                )
+                if (
+                    band is None
+                    or ref.band_id < 0
+                    or ref.band_id >= len(band)
+                    or ref.segment_index < 0
+                    or ref.segment_index >= len(band[ref.band_id])
+                ):
+                    unresolved.append(
+                        f"{ref.region_id}:{ref.band_id}:{ref.segment_index}"
+                    )
+                    continue
+                source_elements.append(band[ref.band_id][ref.segment_index])
+
+            provenance = Provenance(
+                source=ProvenanceSource.LLM,
+                binding_id=draft.draft_id,
+                llm_confidence=draft.confidence,
+            )
+            if unresolved:
+                provenance.review_flag = True
+                provenance.review_reason = ReviewReason.UNRESOLVED_REFERENCE
+
+            tab = None
+            if region is not None:
+                tab = (
+                    tabs[page]
+                    if tabs is not None and page < len(tabs)
+                    else f"page {page}"
+                )
+
+            fields.append(
+                Field(
+                    label_text=draft.label,
+                    control_type=draft.control_type,
+                    bbox=draft.bbox,
+                    options=draft.options,
+                    answers=draft.answers,
+                    annotations=draft.annotations,
+                    region_ref=draft.region_id,
+                    canonical_name=canonical,
+                    value_raw=value_raw,
+                    value_normalized=value_normalized,
+                    normalizer_id=normalizer,
+                    provenance=provenance,
+                    tab=tab,
+                    source_elements=source_elements,
+                    field_id=_field_id(
+                        page, column, region_id, normalize_label(draft.label), ordinal
+                    ),
+                    section_path=_section_path(region, layout, elements_by_id),
+                    unresolved_source_refs=unresolved,
+                )
+            )
     return fields
 

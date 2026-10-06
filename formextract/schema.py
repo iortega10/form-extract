@@ -8,7 +8,7 @@ from typing import Callable
 
 from .model import ControlType, Option
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 _WS_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)

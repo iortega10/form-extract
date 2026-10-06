@@ -24,13 +24,14 @@ class IngestResult:
     parser_version: str
     page_count: int | None = None
     sheet_names: list[str] = field(default_factory=list)
+    sheet_state: dict[str, str] = field(default_factory=dict)
 
 
 def ingest(path: str | Path) -> IngestResult:
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".xlsx":
-        elements, sheets = xlsx.ingest_xlsx(path)
+        elements, sheets, sheet_state = xlsx.ingest_xlsx(path)
         import openpyxl
 
         return IngestResult(
@@ -40,6 +41,7 @@ def ingest(path: str | Path) -> IngestResult:
             parser_version=openpyxl.__version__,
             page_count=len(sheets),
             sheet_names=sheets,
+            sheet_state=sheet_state,
         )
     if suffix == ".pdf":
         has_text_layer = pdf_text.probe_text_layer(path)

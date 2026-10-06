@@ -20,7 +20,6 @@ classifiers = [
 ]
 dependencies = [
     "openpyxl>=3.1",
-    "pymupdf>=1.24",
 ]
 
 [project.urls]
@@ -29,7 +28,8 @@ Source = "https://github.com/iortega10/form-extract"
 Issues = "https://github.com/iortega10/form-extract/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+pdf = ["pymupdf>=1.24"]
+dev = ["pytest>=8", "pymupdf>=1.24"]
 
 [project.scripts]
 formextract-eval = "formextract.evals.harness:main"

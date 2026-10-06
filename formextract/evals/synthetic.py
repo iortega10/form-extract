@@ -4,8 +4,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-import pymupdf
-
 ROWS_PDF = [
     (62.0, [(50.0, "VENDOR COMPLIANCE CHECKLIST", 14.0)]),
     (
@@ -63,6 +61,8 @@ _STATE_LINE_2 = "HI IA ID IL IN KS KY LA MA MD"
 
 
 def build_spec_fragment_pdf(dest: Path) -> Path:
+    import pymupdf
+
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / "spec_fragment.pdf"
     if path.exists():

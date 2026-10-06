@@ -27,9 +27,10 @@ def test_projection_contains_regions_and_bands(spec_pdf):
     layout, chunks = _chunks(spec_pdf)
     assert len(chunks) == 1
     text = chunks[0].text
-    assert "### p0:c0:r0 [header]" in text
-    assert "### p0:c1:r3 [grid]" in text
+    assert "### p0:c0:header:vendor_compliance_checklist [header]" in text
+    assert "### p0:c1:grid:ak_al_ar_az_ca_co_ct_de_fl_ga [grid]" in text
     assert "band " in text
+    assert "0=VENDOR" in text  # segment index prefixes are projected
 
 
 def test_build_prompt_carries_contract_and_rules(spec_pdf):

@@ -24,7 +24,15 @@ forms, questionnaires) as PDF or XLSX. The pipeline is
 pip install -e ".[dev]"
 ```
 
-Requires Python ≥ 3.11, `openpyxl`, `pymupdf`.
+Base install (XLSX only) requires Python ≥ 3.11 and `openpyxl`. PDF text-layer
+support is an optional extra (PyMuPDF is AGPL-3.0 and no longer installed by
+default):
+
+```bash
+pip install -e ".[dev,pdf]"      # development + PDF
+# or, as a plain dependency:
+pip install "form-extract[pdf]"
+```
 
 ## Run the test suite
 
@@ -32,8 +40,9 @@ Requires Python ≥ 3.11, `openpyxl`, `pymupdf`.
 python -m pytest tests -q
 ```
 
-43 tests covering ingest, layout, schema normalization, store idempotency,
-resolve parsing, pipeline end-to-end, and eval-harness scoring.
+80 tests covering ingest, layout, schema normalization, store idempotency,
+resolve parsing, provenance/field identity, hidden sheets, the optional PDF
+backend, pipeline end-to-end, and eval-harness scoring.
 
 ## Run the golden eval (against the bundled fixture)
 
@@ -117,11 +126,17 @@ Notes:
 
 - Re-running the same bytes returns the cached instance (content-hash
   idempotency); change `PIPELINE_VERSION` or clear the store to force a rerun.
-- `.xlsx` and text-layer `.pdf` are supported. Scanned/image-only PDFs raise
-  `NotImplementedError` at ingest (Phase 5 vision tier) and the record comes
-  back `failed` with the reason in `record.errors`.
+- `.xlsx` and text-layer `.pdf` are supported. PDF text-layer support needs
+  the optional `[pdf]` extra; without it a `.pdf` raises `PdfBackendUnavailable`
+  (and the eval harness skips PDF items with a reported reason). Scanned/
+  image-only PDFs raise `NotImplementedError` at ingest (Phase 5 vision tier).
 - Every LLM call is archived under the store root (`llm/`), and the resulting
   instance JSON is written to `<store>/instances/<instance_id>.json`.
+- Each resolved `Field` carries a content-derived `field_id` (stable for the
+  same file + pipeline version, independent of tab names), plus `tab`,
+  `section_path` and `source_elements`. Hidden workbook sheets are captured in
+  `SourceInfo.sheet_state`, excluded from default output, and included only
+  with `PipelineConfig(include_hidden_sheets=True)`.
 
 ### 3. Test against the synthetic fixture directly
 
@@ -144,7 +159,7 @@ formextract/
   store.py      # content-addressed archive + idempotency
   pipeline.py   # orchestration
   evals/        # manifest, synthetic fixtures, canned LLM, harness, scoring
-tests/          # pytest suite (43 tests)
+tests/          # pytest suite (80 tests)
 docs/design/    # design notes
 ```
 

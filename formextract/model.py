@@ -44,6 +44,7 @@ class ReviewReason(str, Enum):
     AMBIGUOUS_ROLE = "ambiguous_role"
     AMBIGUOUS_MARK = "ambiguous_mark"
     NOVEL_FIELD = "novel_field"
+    UNRESOLVED_REFERENCE = "unresolved_reference"
 
 
 class GlyphKind(str, Enum):
@@ -142,6 +143,24 @@ class Option:
 
 
 @dataclass
+class ElementRef:
+    """A model-authored pointer into one band/segment of a projection chunk."""
+
+    region_id: str
+    band_id: int
+    segment_index: int
+
+
+@dataclass
+class FieldAmbiguity:
+    """Why a field's value could not be resolved unambiguously."""
+
+    marker_element_id: str | None = None
+    candidate_element_ids: list[str] = field(default_factory=list)
+    reason: ReviewReason | None = None
+
+
+@dataclass
 class Provenance:
     source: ProvenanceSource | None = None
     binding_id: str | None = None
@@ -172,6 +191,12 @@ class Field:
     edited_by_human: bool = False
     human_value: str | None = None
     provenance: Provenance = field(default_factory=Provenance)
+    tab: str | None = None
+    source_elements: list[str] = field(default_factory=list)
+    field_id: str | None = None
+    section_path: list[str] = field(default_factory=list)
+    ambiguity: FieldAmbiguity | None = None
+    unresolved_source_refs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -235,6 +260,7 @@ class BindingDraft:
     annotations: list[str] = field(default_factory=list)
     canonical_name: str | None = None
     region_id: str | None = None
+    source_refs: list[ElementRef] = field(default_factory=list)
     address: RelationalAddress | None = None
     confidence: float | None = None
     provenance: BindingProvenance | None = None
@@ -303,6 +329,7 @@ class SourceInfo:
     has_text_layer: bool | None = None
     parser: str = ""
     parser_version: str = ""
+    sheet_state: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -322,6 +349,7 @@ class InstanceRecord:
     tabs: list[str] = field(default_factory=list)
     batch_id: str | None = None
     signature: str | None = None
+    hidden_sheets: list[str] = field(default_factory=list)
     status: InstanceStatus = InstanceStatus.COMPLETE
     errors: list[str] = field(default_factory=list)
     idempotency_key: str = ""

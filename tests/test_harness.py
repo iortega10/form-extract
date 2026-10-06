@@ -34,6 +34,9 @@ def test_run_manifest_canned(tmp_path):
     assert agg["anchors"]["f1"] == 1.0
     assert agg["binding"]["f1"] == 1.0
     assert agg["binding"]["tp"] == 8
+    assert agg["field_id_coverage"] == 1.0
+    assert agg["field_ids_unique"] is True
+    assert agg["items_skipped"] == 0
     assert agg["llm_calls"] == 2
     assert agg["budgets_ok"] is True
     assert all(i["status"] == "complete" for i in report["items"])
@@ -48,6 +51,8 @@ def test_run_manifest_without_llm(tmp_path):
     assert agg["llm_calls"] == 0
     assert agg["binding"]["f1"] == 0.0
     assert agg["binding"]["fn"] == 8
+    assert agg["field_id_coverage"] is None
+    assert agg["field_ids_unique"] is True
     # perception is independent of the LLM
     assert agg["region_type_accuracy"] == 1.0
     assert agg["anchors"]["f1"] == 1.0

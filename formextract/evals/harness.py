@@ -33,10 +33,21 @@ class ItemReport:
     anchor_prf: dict[str, Any] = field(default_factory=dict)
     binding_prf: dict[str, Any] = field(default_factory=dict)
     control_accuracy: float | None = None
+    field_id_covered: int = 0
+    field_id_total: int = 0
+    field_ids_unique: bool = True
     llm_calls: int = 0
     tokens: int = 0
     budget_ok: bool = True
     errors: list[str] = field(default_factory=list)
+
+
+def _pdf_available() -> bool:
+    try:
+        import pymupdf  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _center_in(inner: BBox, outer: Region) -> bool:
@@ -136,6 +147,12 @@ def score_item(item: GoldenItem, record: InstanceRecord, elements) -> ItemReport
     report.binding_prf = asdict(binding)
     report.control_accuracy = control_acc
 
+    report.field_id_total = len(record.fields)
+    report.field_id_covered = sum(1 for f in record.fields if f.field_id)
+    report.field_ids_unique = len({f.field_id for f in record.fields if f.field_id}) == len(
+        record.fields
+    )
+
     report.llm_calls = len(record.llm_calls)
     report.tokens = sum(c.tokens or 0 for c in record.llm_calls)
     if item.cost is not None:
@@ -163,6 +180,17 @@ def run_manifest(
 
     for item in manifest.items:
         path = item.resolve_path(manifest.base_dir, fixture_dir)
+        if path.suffix.lower() == ".pdf" and not _pdf_available():
+            reports.append(
+                ItemReport(
+                    item_id=item.item_id,
+                    status="skipped",
+                    errors=[
+                        "pymupdf extra not installed (pip install 'form-extract[pdf]')"
+                    ],
+                )
+            )
+            continue
         client = canned.client_for(item.item_id) if llm == "canned" else None
         pipeline = Pipeline(store, client, PipelineConfig(model=model))
         record = pipeline.run(path)
@@ -185,10 +213,16 @@ def run_manifest(
             "regions": asdict(aggregate_prf(region_scores)) if region_scores else None,
             "anchors": asdict(aggregate_prf(anchor_scores)) if anchor_scores else None,
             "binding": asdict(aggregate_prf(binding_scores)) if binding_scores else None,
+            "field_id_coverage": accuracy(
+                sum(r.field_id_covered for r in reports),
+                sum(r.field_id_total for r in reports),
+            ),
+            "field_ids_unique": all(r.field_ids_unique for r in reports),
             "llm_calls": sum(r.llm_calls for r in reports),
             "tokens": sum(r.tokens for r in reports),
             "budgets_ok": all(r.budget_ok for r in reports),
-            "items_run": len(reports),
+            "items_run": sum(1 for r in reports if r.status != "skipped"),
+            "items_skipped": sum(1 for r in reports if r.status == "skipped"),
         },
     }
     if out is not None:

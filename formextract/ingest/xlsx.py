@@ -75,10 +75,13 @@ def _column_geometry(ws) -> tuple[Callable[[int], float], Callable[[int], float]
     return col_x0, col_x1
 
 
-def ingest_xlsx(path: str | Path) -> tuple[list[Element], list[str]]:
+def ingest_xlsx(path: str | Path) -> tuple[list[Element], list[str], dict[str, str]]:
     wb = openpyxl.load_workbook(filename=str(path), data_only=True)
     elements: list[Element] = []
     sheet_names = list(wb.sheetnames)
+    sheet_state = {
+        ws.title: getattr(ws, "sheet_state", "visible") for ws in wb.worksheets
+    }
     for sheet_index, ws in enumerate(wb.worksheets):
         col_x0, col_x1 = _column_geometry(ws)
         merged_anchors: dict[tuple[int, int], tuple[int, int, int, int]] = {}
@@ -126,4 +129,4 @@ def ingest_xlsx(path: str | Path) -> tuple[list[Element], list[str]]:
                     )
                 )
     wb.close()
-    return elements, sheet_names
+    return elements, sheet_names, sheet_state

@@ -148,9 +148,26 @@ def _band_type(
     return RegionType.FIELD_ROW
 
 
+def _content_region_id(
+    page: int, col: int, rtype: RegionType, first_norm: str, used: set[str]
+) -> str:
+    """Content-derived region id: `p{page}:c{col}:{type}:{first_anchor_norm}`,
+    with a numeric disambiguator only on collision. The first band of a region
+    is the anchor for identity, so the id is stable for the same file + pipeline
+    and independent of tab names."""
+    stem = f"p{page}:c{col}:{rtype.value}:{first_norm.replace(' ', '_') or 'empty'}"
+    candidate = stem
+    n = 2
+    while candidate in used:
+        candidate = f"{stem}:{n}"
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
 def _make_regions(
     bands: dict[int, list[_Band]], page: int, y_min: float, y_max: float,
-    page_median_size: float,
+    page_median_size: float, used_ids: set[str],
 ) -> tuple[list[Region], dict[int, list[RegionType]]]:
     regions: list[Region] = []
     band_types: dict[int, list[RegionType]] = {}
@@ -167,9 +184,12 @@ def _make_regions(
             bbox = region_elements[0].bbox
             for e in region_elements[1:]:
                 bbox = bbox.union(e.bbox)
+            first_norm = normalize_label(group[0].text)
             regions.append(
                 Region(
-                    region_id=f"p{page}:c{col}:r{len(regions)}",
+                    region_id=_content_region_id(
+                        page, col, types[start], first_norm, used_ids
+                    ),
                     type=types[start],
                     bbox=bbox,
                     column=col,
@@ -380,6 +400,7 @@ def analyze(elements: list[Element]) -> LayoutResult:
     all_anchors = []
     columns: dict[int, list[int]] = {}
     bands_out: dict[int, list[list[str]]] = {}
+    used_ids: set[str] = set()
 
     for page in sorted(by_page):
         page_elements = by_page[page]
@@ -391,7 +412,9 @@ def analyze(elements: list[Element]) -> LayoutResult:
         if not page_columns:
             continue
         bands = _make_bands(page_elements, page_columns)
-        regions, band_types = _make_regions(bands, page, y_min, page_h, page_median_size)
+        regions, band_types = _make_regions(
+            bands, page, y_min, page_h, page_median_size, used_ids
+        )
         heights = [e.bbox.height for e in page_elements if e.bbox.height > 0]
         tol_y = max(0.6 * _median(heights, default=1.0), 1e-6)
         glyphs = _classify_glyphs(page_elements, page)

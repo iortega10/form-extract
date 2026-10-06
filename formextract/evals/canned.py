@@ -6,6 +6,11 @@ from typing import Any
 
 from ..resolve import LLMResponse
 
+_LABEL_REGION = "p0:c0:field-row:which_us_states_do_they_ship_to"
+_X_ALL_REGION = "p0:c1:field-row:x_all"
+_YES_NO_REGION = "p0:c1:field-row:yes_x_no"
+
+
 SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
     {
         "label": "Which US states do they ship to",
@@ -13,6 +18,12 @@ SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
         "options": [{"text": "All", "selected": True}],
         "answer": ["ALL"],
         "annotations": ["if not all please check those that apply"],
+        "region_id": _LABEL_REGION,
+        "source_elements": [
+            {"region_id": _LABEL_REGION, "band_id": 1, "segment_index": 0},
+            {"region_id": _X_ALL_REGION, "band_id": 0, "segment_index": 0},
+            {"region_id": _X_ALL_REGION, "band_id": 0, "segment_index": 1},
+        ],
         "confidence": 0.93,
     },
     {
@@ -21,6 +32,13 @@ SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
         "options": [{"text": "Yes", "selected": False}, {"text": "No", "selected": True}],
         "answer": ["No"],
         "annotations": [],
+        "region_id": _LABEL_REGION,
+        "source_elements": [
+            {"region_id": _LABEL_REGION, "band_id": 3, "segment_index": 0},
+            {"region_id": _YES_NO_REGION, "band_id": 3, "segment_index": 0},
+            {"region_id": _YES_NO_REGION, "band_id": 3, "segment_index": 1},
+            {"region_id": _YES_NO_REGION, "band_id": 3, "segment_index": 2},
+        ],
         "confidence": 0.97,
     },
     {
@@ -32,6 +50,13 @@ SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
         ],
         "answer": ["Provisional"],
         "annotations": ["Confirm on vendor portal"],
+        "region_id": _LABEL_REGION,
+        "source_elements": [
+            {"region_id": _LABEL_REGION, "band_id": 4, "segment_index": 0},
+            {"region_id": _YES_NO_REGION, "band_id": 4, "segment_index": 0},
+            {"region_id": _YES_NO_REGION, "band_id": 4, "segment_index": 1},
+            {"region_id": _YES_NO_REGION, "band_id": 4, "segment_index": 2},
+        ],
         "confidence": 0.95,
     },
     {
@@ -40,6 +65,11 @@ SPEC_FRAGMENT_FIELDS: list[dict[str, Any]] = [
         "options": [{"text": "Support Order Log", "selected": True}],
         "answer": ["true"],
         "annotations": ["Check if the vendor is exporting its order log directly"],
+        "region_id": _LABEL_REGION,
+        "source_elements": [
+            {"region_id": _LABEL_REGION, "band_id": 5, "segment_index": 0},
+            {"region_id": _YES_NO_REGION, "band_id": 5, "segment_index": 0},
+        ],
         "confidence": 0.9,
     },
 ]

@@ -39,6 +39,7 @@ def compute_cache_key(
     prompt_version: str,
     model: str,
     params: dict[str, Any],
+    include_hidden_sheets: bool = False,
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
@@ -50,6 +51,7 @@ def compute_cache_key(
             schema_version,
             prompt_version,
             model or "none",
+            "1" if include_hidden_sheets else "0",
             params_hash,
         ]
     )
@@ -61,6 +63,7 @@ class PipelineConfig:
     model: str = "gpt-4o-mini"
     params: dict[str, Any] = field(default_factory=lambda: {"temperature": 0})
     purpose: str = "cold_binding"
+    include_hidden_sheets: bool = False
 
 
 class Pipeline:
@@ -86,6 +89,7 @@ class Pipeline:
             prompt_version=PROMPT_VERSION,
             model=self.config.model if self.llm_client is not None else "none",
             params=self.config.params,
+            include_hidden_sheets=self.config.include_hidden_sheets,
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -98,6 +102,7 @@ class Pipeline:
         elements = []
         layout = None
         tabs: list[str] = []
+        hidden_sheets: list[str] = []
         source = SourceInfo(
             content_hash=chash,
             original_filename=path.name,
@@ -124,12 +129,33 @@ class Pipeline:
             elements = ing.elements
             source.page_count = ing.page_count
             source.sheet_names = ing.sheet_names
+            source.sheet_state = ing.sheet_state
             source.backend = ing.backend.name
             source.backend_reason = ing.backend.reason
             source.has_text_layer = ing.backend.has_text_layer
             source.parser = ing.parser
             source.parser_version = ing.parser_version
-            tabs = ing.sheet_names or [f"page {i}" for i in range(ing.page_count or 0)]
+            hidden_names = {
+                name for name, state in ing.sheet_state.items() if state != "visible"
+            }
+            visible_sheets = [n for n in ing.sheet_names if n not in hidden_names]
+            if ing.sheet_state and not self.config.include_hidden_sheets and hidden_names:
+                elements = [e for e in elements if e.sheet not in hidden_names]
+            if ing.sheet_state:
+                tabs = (
+                    visible_sheets
+                    if not self.config.include_hidden_sheets
+                    else list(ing.sheet_names)
+                )
+            else:
+                tabs = ing.sheet_names or [
+                    f"page {i}" for i in range(ing.page_count or 0)
+                ]
+            hidden_sheets = (
+                sorted(hidden_names)
+                if not self.config.include_hidden_sheets
+                else []
+            )
             layout = analyze(elements)
             if self.llm_client is not None:
                 chunks = project_chunks(layout, elements, tabs)
@@ -143,7 +169,12 @@ class Pipeline:
                         regions=layout.regions,
                         purpose=self.config.purpose,
                     )
-                    fields = drafts_to_fields(drafts)
+                    fields = drafts_to_fields(
+                        drafts,
+                        layout=layout,
+                        elements_by_id={e.element_id: e for e in elements},
+                        tabs=tabs,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     status = InstanceStatus.PARTIAL
                     errors.append(f"resolution failed: {exc}")
@@ -198,6 +229,7 @@ class Pipeline:
             llm_calls=calls,
             match_candidates=[],
             tabs=tabs,
+            hidden_sheets=hidden_sheets,
             batch_id=batch_id,
             signature=None,
             status=status,

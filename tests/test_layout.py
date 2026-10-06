@@ -74,7 +74,7 @@ def _elements(path):
 
 def test_pdf_grid_hypothesis(spec_pdf):
     layout = _layout(spec_pdf)
-    grids = [h for h in layout.hypotheses if h.region_id.endswith(":r3")]
+    grids = [h for h in layout.hypotheses if ":grid:" in h.region_id]
     assert grids
     h = grids[0]
     assert h.control_guesses == [ControlType.MULTI_SELECT]

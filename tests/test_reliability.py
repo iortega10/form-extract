@@ -14,6 +14,7 @@ from formextract.resolve import (
     LLMResponse,
     ProjectionChunk,
     author_drafts,
+    build_prompt,
     parse_drafts_with_errors,
 )
 from formextract.store import Store, content_hash
@@ -73,8 +74,9 @@ def test_key_varies_with_model_prompt_params_schema():
         compute_cache_key(**{**base, "schema_version": "2"}),
         compute_cache_key(**{**base, "prompt_version": "2"}),
         compute_cache_key(**{**base, "content_hash": "d"}),
+        compute_cache_key(**{**base, "include_hidden_sheets": True}),
     }
-    assert len(keys) == 8
+    assert len(keys) == 9
 
 
 def test_key_stable_under_params_reorder():
@@ -308,11 +310,62 @@ def test_rerun_after_partial_reuses_archived_calls(store):
         store=store,
         backoff_seconds=0,
     )
-    assert second.calls == 2  # only the failed chunk is re-spent
+    assert second.calls == 0  # both bad original and bad repair are already archived
     assert len(drafts) == 1
-    assert len(calls) == 3  # good chunk reused + bad chunk's two fresh calls
+    assert len(calls) == 3  # good chunk reused + bad chunk's two cached calls
     assert len(errors) == 1
     assert errors[0].chunk_id == "1"
+
+
+def test_cached_bad_original_goes_straight_to_repair(store):
+    chunk = ProjectionChunk(key="tab", text="content")
+    prompt = build_prompt(chunk)
+    store.archive_llm_call(
+        purpose="cold_binding",
+        model="m",
+        params={"temperature": 0},
+        prompt=prompt,
+        response="not json",
+    )
+
+    class Client:
+        def __init__(self):
+            self.prompts = []
+
+        def complete(self, prompt, *, model, params):
+            self.prompts.append(prompt)
+            return LLMResponse(
+                text=json.dumps(
+                    {
+                        "fields": [
+                            {
+                                "label": "F",
+                                "control_type": "text",
+                                "answer": ["v"],
+                                "annotations": [],
+                            }
+                        ]
+                    }
+                ),
+                model=model,
+                params=params,
+            )
+
+    client = Client()
+    drafts, calls, errors = author_drafts(
+        [chunk],
+        client,
+        model="m",
+        params={"temperature": 0},
+        store=store,
+        backoff_seconds=0,
+    )
+
+    assert len(client.prompts) == 1
+    assert "Parse error" in client.prompts[0]
+    assert len(drafts) == 1
+    assert errors == []
+    assert len(calls) == 2  # cached bad original + fresh repair
 
 
 def test_empty_sheet_complete_is_cached(tmp_path):

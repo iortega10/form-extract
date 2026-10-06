@@ -66,3 +66,23 @@ def test_pipeline_unsupported_source_fails(tmp_path, store):
 def test_pipeline_batches_can_be_tagged(spec_pdf, store):
     record = Pipeline(store, None).run(spec_pdf, batch_id="batch-1")
     assert record.batch_id == "batch-1"
+
+
+def test_pipeline_deterministic_across_stores(spec_xlsx, tmp_path):
+    first = Pipeline(
+        Store(tmp_path / "s1"), client_for("spec_fragment_xlsx"), PipelineConfig()
+    ).run(spec_xlsx)
+    second = Pipeline(
+        Store(tmp_path / "s2"), client_for("spec_fragment_xlsx"), PipelineConfig()
+    ).run(spec_xlsx)
+
+    assert [f.field_id for f in first.fields] == [f.field_id for f in second.fields]
+    assert [f.value_normalized for f in first.fields] == [
+        f.value_normalized for f in second.fields
+    ]
+    assert [f.source_elements for f in first.fields] == [
+        f.source_elements for f in second.fields
+    ]
+    assert [f.section_path for f in first.fields] == [
+        f.section_path for f in second.fields
+    ]
