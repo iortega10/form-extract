@@ -2,6 +2,8 @@
 glyph classification, candidate hypotheses, candidate anchors."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import statistics
 from dataclasses import dataclass
@@ -668,4 +670,117 @@ def analyze(
         anchors=all_anchors,
         marker_classes=all_marker_classes,
     )
+
+
+def _anchor_page(anchor_id: str) -> int:
+    prefix = anchor_id.split(":", 1)[0]
+    try:
+        return int(prefix[1:])
+    except (ValueError, IndexError):
+        return 0
+
+
+def page_anchor_multiset(layout: LayoutResult, page: int) -> tuple[str, ...]:
+    """Return the sorted normalised anchor-label multiset for one page/tab.
+
+    Geometry equality is not enough to authorise reuse: two tabs must also
+    carry the same labels. Anchors are page-scoped by their `p{page}:` id
+    prefix, so the comparison is per tab without reading any answer text.
+    """
+    return tuple(
+        sorted(
+            a.normalized_text
+            for a in layout.anchors
+            if _anchor_page(a.anchor_id) == page
+        )
+    )
+
+
+def _element_bboxes(eids: list[str], elements_by_id: dict[str, Element]) -> BBox:
+    out = BBox()
+    found = False
+    for eid in eids:
+        e = elements_by_id.get(eid)
+        if e is None:
+            continue
+        out = e.bbox if not found else out.union(e.bbox)
+        found = True
+    return out
+
+
+def _page_geometry_payload(
+    layout: LayoutResult, elements_by_id: dict[str, Element], page: int
+) -> list[object]:
+    """Build the integer-only geometry payload hashed by ``page_geometry_signature``.
+
+    Per column and region in order: column, region type, band count, quantised
+    region bbox, and per band the element count, quantised bbox and quantised
+    vertical gap to the previous band. Everything is quantised at the banding
+    scale (`0.6 * median element height`), so sub-scale shifts collapse to one
+    bucket and `region_id` plus all text stay out. A page with no regions is an
+    empty payload.
+    """
+    page_regions = [r for r in layout.regions if r.bbox.page == page]
+    if not page_regions:
+        return []
+
+    heights = [
+        e.bbox.height
+        for e in elements_by_id.values()
+        if e.bbox.page == page and e.bbox.height > 0
+    ]
+    tol_y = max(0.6 * _median(heights, default=1.0), 1e-6)
+
+    def quantise(value: float) -> int:
+        return int(round(value / tol_y))
+
+    parts: list[object] = []
+    for region in sorted(
+        page_regions, key=lambda r: (r.column, r.band_ids[0] if r.band_ids else 0)
+    ):
+        region_part: list[object] = [
+            region.column,
+            region.type.value,
+            len(region.band_ids),
+            quantise(region.bbox.x0),
+            quantise(region.bbox.y0),
+            quantise(region.bbox.x1),
+            quantise(region.bbox.y1),
+        ]
+        bands = layout.bands.get(page * 1000 + region.column, [])
+        band_parts: list[object] = []
+        prev_bottom: float | None = None
+        for band_id in region.band_ids:
+            eids = bands[band_id] if band_id < len(bands) else []
+            bbox = _element_bboxes(eids, elements_by_id)
+            gap = quantise(bbox.y0 - prev_bottom) if prev_bottom is not None else 0
+            band_parts.append(
+                [
+                    len(eids),
+                    quantise(bbox.x0),
+                    quantise(bbox.y0),
+                    quantise(bbox.x1),
+                    quantise(bbox.y1),
+                    gap,
+                ]
+            )
+            prev_bottom = bbox.y1
+        region_part.append(band_parts)
+        parts.append(region_part)
+    return parts
+
+
+def page_geometry_signature(
+    layout: LayoutResult, elements_by_id: dict[str, Element], page: int
+) -> str:
+    """Hash the quantised geometry of one page/tab, excluding all text.
+
+    The payload comes from :func:`_page_geometry_payload`; a page with no
+    regions hashes to a fixed empty-tab constant.
+    """
+    parts = _page_geometry_payload(layout, elements_by_id, page)
+    if not parts:
+        return hashlib.sha256(b"empty").hexdigest()
+    payload = json.dumps(parts, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

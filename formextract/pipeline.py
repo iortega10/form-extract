@@ -13,7 +13,7 @@ from typing import Any
 from openpyxl.utils import column_index_from_string
 
 from .ingest import ingest
-from .layout import analyze
+from .layout import analyze, page_anchor_multiset, page_geometry_signature
 from .model import (
     CHECKBOX_MARK_FOLLOWS_OPTION,
     CHECKBOX_MARK_PRECEDES_OPTION,
@@ -28,10 +28,14 @@ from .model import (
 from .resolve import (
     LLMClient,
     PROMPT_VERSION,
+    ResolutionError,
     author_drafts,
+    drafts_resolve_cleanly,
     drafts_to_fields,
     project_chunks,
+    remap_drafts_for_page,
 )
+from .reuse import apply_binding
 from .schema import SCHEMA_VERSION, normalize_label
 from .store import Store, canonical_json, content_hash
 
@@ -224,6 +228,7 @@ def compute_cache_key(
     include_hidden_sheets: bool = False,
     non_answer_columns: tuple[Any, ...] = (),
     checkbox_conventions: tuple[Any, ...] = (),
+    reuse_layout_bindings: bool = False,
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
@@ -245,6 +250,7 @@ def compute_cache_key(
             params_hash,
             non_answer_hash,
             conventions_hash,
+            "1" if reuse_layout_bindings else "0",
         ]
     )
     return hashlib.sha256(parts.encode("utf-8")).hexdigest()
@@ -258,6 +264,7 @@ class PipelineConfig:
     include_hidden_sheets: bool = False
     non_answer_columns: list[Any] = field(default_factory=list)
     checkbox_conventions: list[Any] = field(default_factory=list)
+    reuse_layout_bindings: bool = False
 
 
 class Pipeline:
@@ -275,6 +282,70 @@ class Pipeline:
             self.config.checkbox_conventions
         )
 
+    def _author_with_reuse(self, chunks, layout, elements, tabs, non_answer_ids):
+        """Author each tab once and replay geometrically identical tabs.
+
+        Per workbook and in memory only: the exemplar map lives for the duration
+        of one ``run`` call and is never persisted. A tab reuses an earlier
+        exemplar only when its geometry signature and normalised anchor-label
+        multiset both match, and every remapped binding resolves to a live
+        element in the current tab. Any miss falls back to a fresh call for
+        that tab; resolution still runs against the current tab's own elements.
+        """
+        elements_by_id = {e.element_id: e for e in elements}
+        region_bbox = {r.region_id: r.bbox for r in layout.regions}
+        reuse: dict[tuple[str, tuple[str, ...]], tuple[int, list]] = {}
+        drafts = []
+        calls: list[LLMCall] = []
+        errors: list[ResolutionError] = []
+        replayed_draft_ids: set[str] = set()
+
+        for idx, chunk in enumerate(chunks):
+            page = tabs.index(chunk.key) if chunk.key in tabs else idx
+            key = (
+                page_geometry_signature(layout, elements_by_id, page),
+                page_anchor_multiset(layout, page),
+            )
+            exemplar = reuse.get(key)
+            if exemplar is not None:
+                exemplar_page, exemplar_drafts = exemplar
+                remapped = remap_drafts_for_page(
+                    exemplar_drafts,
+                    exemplar_page,
+                    page,
+                    regions=layout.regions,
+                    region_bbox=region_bbox,
+                )
+                if drafts_resolve_cleanly(remapped, layout):
+                    remapped = apply_binding(
+                        remapped,
+                        elements_by_id,
+                        layout,
+                        self.config,
+                    )
+                    drafts.extend(remapped)
+                    replayed_draft_ids.update(d.draft_id for d in remapped)
+                    continue
+                # Reuse miss: fall through to a fresh call for this tab.
+
+            fresh_drafts, fresh_calls, fresh_errors = author_drafts(
+                [chunk],
+                self.llm_client,
+                model=self.config.model,
+                params=self.config.params,
+                store=self.store,
+                regions=layout.regions,
+                purpose=self.config.purpose,
+            )
+            drafts.extend(fresh_drafts)
+            calls.extend(fresh_calls)
+            for err in fresh_errors:
+                errors.append(ResolutionError(str(idx), err.tab, err.reason))
+            if fresh_drafts:
+                reuse[key] = (page, fresh_drafts)
+
+        return drafts, calls, errors, replayed_draft_ids
+
     def run(
         self, path: str | Path, batch_id: str | None = None, *, force: bool = False
     ) -> InstanceRecord:
@@ -290,6 +361,7 @@ class Pipeline:
             include_hidden_sheets=self.config.include_hidden_sheets,
             non_answer_columns=tuple(self.config.non_answer_columns),
             checkbox_conventions=tuple(self._checkbox_conventions),
+            reuse_layout_bindings=self.config.reuse_layout_bindings,
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -365,23 +437,39 @@ class Pipeline:
                     layout, elements, tabs, non_answer_element_ids=non_answer_ids
                 )
                 try:
-                    drafts, calls, resolve_errors = author_drafts(
-                        chunks,
-                        self.llm_client,
-                        model=self.config.model,
-                        params=self.config.params,
-                        store=self.store,
-                        regions=layout.regions,
-                        purpose=self.config.purpose,
-                    )
-                    fields = drafts_to_fields(
-                        drafts,
-                        layout=layout,
-                        elements_by_id={e.element_id: e for e in elements},
-                        tabs=tabs,
-                        non_answer_element_ids=non_answer_ids,
-                        checkbox_conventions=self._checkbox_conventions,
-                    )
+                    if self.config.reuse_layout_bindings:
+                        drafts, calls, resolve_errors, replayed_draft_ids = (
+                            self._author_with_reuse(
+                                chunks, layout, elements, tabs, non_answer_ids
+                            )
+                        )
+                        fields = drafts_to_fields(
+                            drafts,
+                            layout=layout,
+                            elements_by_id={e.element_id: e for e in elements},
+                            tabs=tabs,
+                            non_answer_element_ids=non_answer_ids,
+                            checkbox_conventions=self._checkbox_conventions,
+                            replayed_draft_ids=replayed_draft_ids,
+                        )
+                    else:
+                        drafts, calls, resolve_errors = author_drafts(
+                            chunks,
+                            self.llm_client,
+                            model=self.config.model,
+                            params=self.config.params,
+                            store=self.store,
+                            regions=layout.regions,
+                            purpose=self.config.purpose,
+                        )
+                        fields = drafts_to_fields(
+                            drafts,
+                            layout=layout,
+                            elements_by_id={e.element_id: e for e in elements},
+                            tabs=tabs,
+                            non_answer_element_ids=non_answer_ids,
+                            checkbox_conventions=self._checkbox_conventions,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     status = InstanceStatus.PARTIAL
                     errors.append(f"resolution failed: {exc}")

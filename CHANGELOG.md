@@ -17,6 +17,22 @@ single schema version bump per output-changing release.
 - **Structure probe (integers-only).** `python -m
   formextract.evals.structure_probe` prints a deterministic, integers-only
   census of a workbook for safe inspection of a real document.
+- **Opt-in layout-signature reuse (in-memory).** With
+  `PipelineConfig(reuse_layout_bindings=True)`, tabs in one workbook that share
+  the same quantised geometry signature and normalised anchor-label multiset are
+  authored once; later tabs replay the binding against their own elements
+  (`ProvenanceSource.REPLAY`) and skip the LLM call. The flag defaults to
+  `False`, which keeps the 0.3.1 single-call authoring path byte-for-byte (one
+  call per tab, `REPLAY` never emitted). Reuse authorises only the binding
+  shape, behind a four-step ladder: equal geometry signatures, equal normalised
+  anchor-label multisets, every reused binding's `(column, band, segment)`
+  address resolving to a live element in the target tab (any miss refuses the
+  whole tab and falls back to a fresh call), and a successful value read before
+  a clean `REPLAY` without a review flag. Values are never copied: checkbox/bool
+  selections are re-derived from the target tab's own markers, and free-text
+  answers are read from the target tab's own value elements (an unreadable text
+  value is null with `ReviewReason.REPLAY_MISMATCH`). The exemplar map is per
+  run and in memory only, never persisted.
 
 ## 0.3.1 (unreleased)
 

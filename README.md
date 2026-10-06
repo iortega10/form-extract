@@ -138,7 +138,6 @@ Notes:
   `section_path` and `source_elements`. Hidden workbook sheets are captured in
   `SourceInfo.sheet_state`, excluded from default output, and included only
   with `PipelineConfig(include_hidden_sheets=True)`.
-
 ### 3. Test against the synthetic fixture directly
 
 ```python
@@ -192,6 +191,35 @@ Declare columns that hold reference/tag words (never answers) with
 `PipelineConfig(non_answer_columns=[{"tab": "CHC*", "column": "Z"}])`. Text in
 those columns is projected as annotations only and is never a marker or an
 option candidate.
+
+## Repeated tabs (opt-in reuse)
+
+`PipelineConfig(reuse_layout_bindings=True)` turns on in-memory layout-signature
+reuse. It is off by default; with the default `False` the pipeline is exactly
+the single-call authoring path from 0.3.1 (one LLM call per tab, `REPLAY` never
+appears).
+
+When enabled, the first tab of a signature group (in workbook order) is the
+exemplar and is authored normally. A later tab reuses it only when the whole
+four-step ladder passes:
+
+1. its quantised geometry signature (banding-scale buckets of column/region
+   bboxes and band counts — no text, no region ids) equals the exemplar's;
+2. its normalised anchor-label multiset equals the exemplar's;
+3. every reused binding's `(column, band, segment)` address resolves to a live
+   element in that tab — any miss refuses reuse for the whole tab and falls
+   back to a fresh model call;
+4. reused fields are emitted with `ProvenanceSource.REPLAY` and no review flag
+   only when the ladder was clean and the value read succeeded.
+
+Reuse skips authoring only, never value resolution. Checkbox/bool selections are
+re-derived from the target tab's own markers; a reused tab's free-text answers
+are **read from that tab's own value elements** (never copied from the exemplar)
+and an unreadable text value is null with `ReviewReason.REPLAY_MISMATCH`. The
+exemplar map is per run and in memory only — it is never written to the store.
+
+The six-identical-tabs case drops from 6 model calls to 1 when the flag is on; a
+mixed workbook of two layouts x three tabs drops from 6 calls to 2.
 
 ## Checking a real workbook safely
 

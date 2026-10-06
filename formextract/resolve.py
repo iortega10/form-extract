@@ -389,6 +389,137 @@ def author_drafts(
     return drafts, calls, errors
 
 
+def _remap_region_id(region_id: str | None, source_prefix: str, target_prefix: str) -> str | None:
+    if region_id is None:
+        return None
+    if region_id.startswith(source_prefix):
+        return target_prefix + region_id[len(source_prefix):]
+    return region_id
+
+
+def remap_drafts_for_page(
+    drafts: list[BindingDraft],
+    source_page: int,
+    target_page: int,
+    *,
+    regions: list[Region] | None = None,
+    region_bbox: dict[str, BBox] | None = None,
+) -> list[BindingDraft]:
+    """Rebase exemplar drafts onto another page of the same workbook.
+
+    Region pointers are remapped structurally, never by text matching: each
+    ``source_ref`` is resolved to its source region to recover the column, then
+    pointed at the target page's region for that same ``(column, band_id)``.
+    Band and segment indices stay the same because reuse is only attempted
+    across geometrically equal tabs. This keeps value refs working even when a
+    content-derived value region id differs across tabs (the target's own
+    answer text is never matched). The exemplar's authored answers and option
+    selections are cleared so a reused tab re-derives values from its own
+    elements rather than replaying someone else's filled answers.
+    """
+    regions = regions or []
+    region_bbox = region_bbox or {}
+    source_regions = {r.region_id: r for r in regions if r.bbox.page == source_page}
+    target_region_for_band: dict[tuple[int, int], Region] = {}
+    for region in regions:
+        if region.bbox.page != target_page:
+            continue
+        for band_id in region.band_ids:
+            target_region_for_band[(region.column, band_id)] = region
+
+    out: list[BindingDraft] = []
+    for draft in drafts:
+        anchor_band = None
+        for ref in draft.source_refs:
+            if ref.region_id == draft.region_id:
+                anchor_band = ref.band_id
+                break
+
+        new_refs: list[ElementRef] = []
+        for ref in draft.source_refs:
+            source_region = source_regions.get(ref.region_id)
+            if source_region is None:
+                new_refs.append(ref)  # unresolvable: verification refuses the tab
+                continue
+            target_region = target_region_for_band.get(
+                (source_region.column, ref.band_id)
+            )
+            if target_region is None:
+                new_refs.append(ref)  # no such column/band in the target tab
+                continue
+            new_refs.append(
+                ElementRef(
+                    region_id=target_region.region_id,
+                    band_id=ref.band_id,
+                    segment_index=ref.segment_index,
+                )
+            )
+
+        new_region: str | None
+        if draft.region_id is None:
+            new_region = None
+        else:
+            source_region = source_regions.get(draft.region_id)
+            if source_region is not None and anchor_band is not None:
+                target_region = target_region_for_band.get(
+                    (source_region.column, anchor_band)
+                )
+                new_region = target_region.region_id if target_region else None
+            else:
+                new_region = _remap_region_id(
+                    draft.region_id,
+                    f"p{source_page}:",
+                    f"p{target_page}:",
+                )
+
+        out.append(
+            BindingDraft(
+                draft_id=f"replay-{uuid.uuid4().hex[:12]}",
+                label=draft.label,
+                control_type=draft.control_type,
+                bbox=region_bbox.get(new_region, draft.bbox),
+                options=[
+                    Option(text=o.text, selected=None, raw_span=o.raw_span, bbox=o.bbox)
+                    for o in draft.options
+                ],
+                answers=[],
+                annotations=list(draft.annotations),
+                canonical_name=draft.canonical_name,
+                region_id=new_region,
+                source_refs=new_refs,
+                address=draft.address,
+                confidence=draft.confidence,
+                provenance=draft.provenance,
+            )
+        )
+    return out
+
+
+def drafts_resolve_cleanly(drafts: list[BindingDraft], layout: LayoutResult) -> bool:
+    """True when every draft's region and source-element pointers resolve.
+
+    This is the third rung of the reuse ladder: a geometry+label match still
+    falls back to a fresh call if any reused binding points at a region, band
+    or segment that does not exist in the current tab.
+    """
+    region_by_id = {r.region_id: r for r in layout.regions}
+    for draft in drafts:
+        if draft.region_id is None or draft.region_id not in region_by_id:
+            return False
+        for ref in draft.source_refs:
+            region = region_by_id.get(ref.region_id)
+            if region is None:
+                return False
+            bands = layout.bands.get(region.bbox.page * 1000 + region.column)
+            if bands is None:
+                return False
+            if ref.band_id < 0 or ref.band_id >= len(bands):
+                return False
+            if ref.segment_index < 0 or ref.segment_index >= len(bands[ref.band_id]):
+                return False
+    return True
+
+
 def _anchor_band_id(draft: BindingDraft, region_id: str | None) -> int | None:
     for ref in draft.source_refs:
         if ref.region_id == region_id:
@@ -657,6 +788,7 @@ def drafts_to_fields(
     tabs: list[str] | None = None,
     non_answer_element_ids: set[str] | None = None,
     checkbox_conventions: list[CheckboxConvention] | None = None,
+    replayed_draft_ids: set[str] | None = None,
 ) -> list[Field]:
     elements_by_id = elements_by_id or {}
     non_answer_ids = non_answer_element_ids or set()
@@ -800,14 +932,22 @@ def drafts_to_fields(
                 else normalize(normalizer, value_raw, options)
             )
 
+            replayed = replayed_draft_ids is not None and draft.draft_id in replayed_draft_ids
             provenance = Provenance(
-                source=ProvenanceSource.LLM,
+                source=ProvenanceSource.REPLAY if replayed else ProvenanceSource.LLM,
                 binding_id=draft.draft_id,
                 llm_confidence=draft.confidence,
             )
             if unresolved:
                 provenance.review_flag = True
                 provenance.review_reason = ReviewReason.UNRESOLVED_REFERENCE
+            if (
+                replayed
+                and draft.control_type is ControlType.TEXT
+                and not draft.answers
+            ):
+                provenance.review_flag = True
+                provenance.review_reason = ReviewReason.REPLAY_MISMATCH
             if decision is not None and decision.kind in ("ambiguous", "declining"):
                 provenance.review_flag = True
                 provenance.review_reason = ReviewReason.AMBIGUOUS_MARK
