@@ -16,7 +16,7 @@ from typing import Any
 from ..ingest import ingest
 from ..model import BBox, Field, InstanceRecord, Region
 from ..pipeline import Pipeline, PipelineConfig
-from ..resolve import GEOMETRIC_SELECTION_TOKEN
+from ..resolve import DECLARED_CONVENTION_TOKEN, GEOMETRIC_SELECTION_TOKEN
 from ..schema import normalize_label
 from ..store import Store
 from . import canned
@@ -153,7 +153,11 @@ def _score_mark_selections(golden: Golden, record: InstanceRecord) -> tuple[int,
 
 
 def _is_declared_selection(field: Field) -> bool:
-    return field.edited_by_human or GEOMETRIC_SELECTION_TOKEN in field.provenance.heuristic_agreement
+    return (
+        field.edited_by_human
+        or GEOMETRIC_SELECTION_TOKEN in field.provenance.heuristic_agreement
+        or DECLARED_CONVENTION_TOKEN in field.provenance.heuristic_agreement
+    )
 
 
 def _score_silent_selections(record: InstanceRecord) -> tuple[int, int]:
@@ -246,7 +250,11 @@ def run_manifest(
             )
             continue
         client = canned.client_for(item.item_id) if llm == "canned" else None
-        pipeline = Pipeline(store, client, PipelineConfig(model=model))
+        pipeline = Pipeline(
+            store,
+            client,
+            PipelineConfig(model=model, checkbox_conventions=item.checkbox_conventions),
+        )
         record = pipeline.run(path)
         elements = ingest(path).elements
         reports.append(score_item(item, record, elements))

@@ -2,8 +2,10 @@
 Authors bindings; does not resolve values (that is replay's job)."""
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -13,10 +15,14 @@ from .layout import strip_marks
 from .model import (
     AMBIGUITY_BETWEEN_OPTIONS,
     AMBIGUITY_COMPETING_OPTIONS,
+    AMBIGUITY_CONVENTION_UNSUPPORTED,
+    CHECKBOX_MARK_FOLLOWS_OPTION,
+    CHECKBOX_MARK_PRECEDES_OPTION,
     AuthoredBy,
     BBox,
     BindingDraft,
     BindingProvenance,
+    CheckboxConvention,
     ControlType,
     Element,
     ElementRef,
@@ -47,6 +53,7 @@ BINDING_OUTPUT_CONTRACT = """{"fields": [
 
 PROMPT_VERSION = "2"
 GEOMETRIC_SELECTION_TOKEN = "marker_auto_select"
+DECLARED_CONVENTION_TOKEN = "declared_checkbox_convention"
 
 TRANSPORT_MAX_ATTEMPTS = 3
 TRANSPORT_BACKOFF_SECONDS = 0.5
@@ -432,10 +439,12 @@ def _section_path(
 
 @dataclass
 class _MarkDecision:
-    kind: str  # "auto_select" | "ambiguous" | "declining"
+    kind: str  # "auto_select" | "declared_convention" | "ambiguous" | "declining"
     option_text: str | None = None
     marker_element_id: str | None = None
     candidate_element_ids: list[str] = field(default_factory=list)
+    left_candidate_element_ids: list[str] = field(default_factory=list)
+    right_candidate_element_ids: list[str] = field(default_factory=list)
     reason: str | None = None
 
 
@@ -498,6 +507,8 @@ def _geometric_mark_decision(
             kind="ambiguous",
             marker_element_id=c.marker_element_id,
             candidate_element_ids=c.candidate_element_ids,
+            left_candidate_element_ids=c.left_candidate_element_ids,
+            right_candidate_element_ids=c.right_candidate_element_ids,
             reason=AMBIGUITY_BETWEEN_OPTIONS,
         )
     if competing:
@@ -506,6 +517,8 @@ def _geometric_mark_decision(
             kind="ambiguous",
             marker_element_id=c.marker_element_id,
             candidate_element_ids=c.candidate_element_ids,
+            left_candidate_element_ids=c.left_candidate_element_ids,
+            right_candidate_element_ids=c.right_candidate_element_ids,
             reason=AMBIGUITY_COMPETING_OPTIONS,
         )
     if right_only:
@@ -517,12 +530,16 @@ def _geometric_mark_decision(
                 kind="declining",
                 marker_element_id=c.marker_element_id,
                 candidate_element_ids=c.candidate_element_ids,
+                left_candidate_element_ids=c.left_candidate_element_ids,
+                right_candidate_element_ids=c.right_candidate_element_ids,
             )
         return _MarkDecision(
             kind="auto_select",
             option_text=option_text,
             marker_element_id=c.marker_element_id,
             candidate_element_ids=c.candidate_element_ids,
+            left_candidate_element_ids=c.left_candidate_element_ids,
+            right_candidate_element_ids=c.right_candidate_element_ids,
         )
     if classifications:
         c = classifications[0]
@@ -536,6 +553,102 @@ def _geometric_mark_decision(
     return None
 
 
+def _tab_has_wildcard(tab: str) -> bool:
+    return any(ch in tab for ch in ("*", "?", "[", "]"))
+
+
+def _convention_specificity(
+    convention: CheckboxConvention,
+) -> tuple[bool, bool, int]:
+    return (
+        convention.anchor_pattern is not None,
+        not _tab_has_wildcard(convention.tab),
+        len(convention.tab),
+    )
+
+
+def _matching_conventions(
+    conventions: list[CheckboxConvention] | None,
+    tab: str | None,
+    label: str,
+) -> list[CheckboxConvention]:
+    if not conventions:
+        return []
+    norm_label = normalize_label(label)
+    out: list[CheckboxConvention] = []
+    for c in conventions:
+        if tab is not None and not fnmatch.fnmatch(tab, c.tab):
+            continue
+        if c.anchor_pattern is not None and re.search(c.anchor_pattern, norm_label) is None:
+            continue
+        out.append(c)
+    return out
+
+
+def _most_specific_convention(
+    matches: list[CheckboxConvention],
+) -> CheckboxConvention | None:
+    if not matches:
+        return None
+    best = matches[0]
+    best_key = _convention_specificity(best)
+    for c in matches[1:]:
+        key = _convention_specificity(c)
+        if key > best_key:
+            best, best_key = c, key
+    return best
+
+
+def _apply_declared_convention(
+    decision: _MarkDecision,
+    draft: BindingDraft,
+    tab: str | None,
+    elements_by_id: dict[str, Element],
+    conventions: list[CheckboxConvention] | None,
+) -> _MarkDecision:
+    """Apply a caller-declared convention to a marker decision.
+
+    The model is never consulted here. A convention can only *select* for the
+    BETWEEN class; any other class keeps its own rule. A convention the geometry
+    cannot support (no candidate on the required side) selects nothing, keeps
+    the ambiguity and is recorded with ``AMBIGUITY_CONVENTION_UNSUPPORTED``.
+    """
+    convention = _most_specific_convention(
+        _matching_conventions(conventions, tab, draft.label)
+    )
+    if convention is None:
+        return decision
+
+    if convention.convention == CHECKBOX_MARK_FOLLOWS_OPTION:
+        candidate_ids = decision.left_candidate_element_ids
+    else:
+        candidate_ids = decision.right_candidate_element_ids
+
+    option_text = None
+    if candidate_ids:
+        candidate = elements_by_id.get(candidate_ids[0])
+        option_text = strip_marks(candidate.text) if candidate is not None else None
+    if option_text is None:
+        return _MarkDecision(
+            kind="ambiguous",
+            marker_element_id=decision.marker_element_id,
+            candidate_element_ids=decision.candidate_element_ids,
+            left_candidate_element_ids=decision.left_candidate_element_ids,
+            right_candidate_element_ids=decision.right_candidate_element_ids,
+            reason=AMBIGUITY_CONVENTION_UNSUPPORTED,
+        )
+    if decision.reason != AMBIGUITY_BETWEEN_OPTIONS:
+        return decision
+    return _MarkDecision(
+        kind="declared_convention",
+        option_text=option_text,
+        marker_element_id=decision.marker_element_id,
+        candidate_element_ids=decision.candidate_element_ids,
+        left_candidate_element_ids=decision.left_candidate_element_ids,
+        right_candidate_element_ids=decision.right_candidate_element_ids,
+    )
+
+
 def drafts_to_fields(
     drafts: list[BindingDraft],
     *,
@@ -543,6 +656,7 @@ def drafts_to_fields(
     elements_by_id: dict[str, Element] | None = None,
     tabs: list[str] | None = None,
     non_answer_element_ids: set[str] | None = None,
+    checkbox_conventions: list[CheckboxConvention] | None = None,
 ) -> list[Field]:
     elements_by_id = elements_by_id or {}
     non_answer_ids = non_answer_element_ids or set()
@@ -601,6 +715,14 @@ def drafts_to_fields(
                     continue
                 source_elements.append(band[ref.band_id][ref.segment_index])
 
+            tab = None
+            if region is not None:
+                tab = (
+                    tabs[page]
+                    if tabs is not None and page < len(tabs)
+                    else f"page {page}"
+                )
+
             decision = (
                 _geometric_mark_decision(
                     draft, source_elements, layout, elements_by_id, non_answer_ids
@@ -608,8 +730,12 @@ def drafts_to_fields(
                 if layout is not None
                 else None
             )
+            if decision is not None and checkbox_conventions:
+                decision = _apply_declared_convention(
+                    decision, draft, tab, elements_by_id, checkbox_conventions
+                )
 
-            if decision is not None and decision.kind == "auto_select":
+            if decision is not None and decision.kind in ("auto_select", "declared_convention"):
                 matched = _match_option(decision.option_text or "", draft.options)
                 if matched is None:
                     decision = _MarkDecision(
@@ -621,6 +747,16 @@ def drafts_to_fields(
                         Option(
                             text=o.text,
                             selected=None,
+                            raw_span=o.raw_span,
+                            bbox=o.bbox,
+                        )
+                        for o in draft.options
+                    ]
+                elif decision.kind == "declared_convention":
+                    options = [
+                        Option(
+                            text=o.text,
+                            selected=(True if o.text == matched else None),
                             raw_span=o.raw_span,
                             bbox=o.bbox,
                         )
@@ -684,6 +820,8 @@ def drafts_to_fields(
                 } != {normalize_label(t) for t in geometric_selected}:
                     provenance.review_flag = True
                     provenance.review_reason = ReviewReason.AMBIGUOUS_MARK
+            if decision is not None and decision.kind == "declared_convention":
+                provenance.heuristic_agreement.append(DECLARED_CONVENTION_TOKEN)
 
             ambiguity = None
             if decision is not None and decision.kind == "ambiguous":
@@ -691,14 +829,6 @@ def drafts_to_fields(
                     marker_element_id=decision.marker_element_id,
                     candidate_element_ids=decision.candidate_element_ids,
                     reason=decision.reason,
-                )
-
-            tab = None
-            if region is not None:
-                tab = (
-                    tabs[page]
-                    if tabs is not None and page < len(tabs)
-                    else f"page {page}"
                 )
 
             fields.append(

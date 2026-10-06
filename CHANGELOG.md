@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
+## Unreleased (0.4.0)
+
+### Added
+
+- **`checkbox_conventions`.** Callers can declare, per tab and anchor pattern,
+  which way a marker between two options points (`mark_precedes_option` /
+  `mark_follows_option`); the package then selects deterministically. A
+  declaration applies only to markers between two options, and there is no
+  default because real forms mix conventions. Without a declaration a
+  between-marker stays ambiguous.
+- **Structure probe (integers-only).** `python -m
+  formextract.evals.structure_probe` prints a deterministic, integers-only
+  census of a workbook for safe inspection of a real document.
+
 ## 0.3.0 (2026-10-05)
 
 This release also carries the 0.2.0 reliability work below: 0.2.0 was never tagged or

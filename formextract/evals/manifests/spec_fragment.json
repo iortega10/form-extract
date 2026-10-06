@@ -106,6 +106,32 @@
         ]
       },
       "cost": {"llm_calls": 1}
+    },
+    {
+      "item_id": "spec_fragment_convention_xlsx",
+      "synthetic": "spec_fragment_convention_xlsx",
+      "checkbox_conventions": [
+        {"tab": "Declaration", "anchor_pattern": "priority", "convention": "mark_follows_option"}
+      ],
+      "golden": {
+        "regions": [
+          {"label_hint": "priority", "type": "field-row"},
+          {"label_hint": "low", "type": "field-row"}
+        ],
+        "anchors": [
+          {"normalized_text": "priority", "occurrence_ordinal": 0}
+        ],
+        "fields": [
+          {
+            "label": "Priority",
+            "canonical_name": "priority",
+            "control_type": "single_select",
+            "value": "Low",
+            "selected_options": ["Low"]
+          }
+        ]
+      },
+      "cost": {"llm_calls": 1}
     }
   ]
 }

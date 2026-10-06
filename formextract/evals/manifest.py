@@ -48,6 +48,7 @@ class GoldenItem:
     path: str | None = None
     synthetic: str | None = None
     cost: CostBudget | None = None
+    checkbox_conventions: list[dict] = field(default_factory=list)
 
     def resolve_path(self, base_dir: Path, fixture_dir: Path) -> Path:
         if self.synthetic:
@@ -91,6 +92,7 @@ def load_manifest(path: str | Path) -> Manifest:
                 synthetic=item.get("synthetic"),
                 golden=_golden(item.get("golden", {})),
                 cost=CostBudget(**item["cost"]) if item.get("cost") else None,
+                checkbox_conventions=item.get("checkbox_conventions", []),
             )
         )
     return Manifest(

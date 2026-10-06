@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,7 +15,10 @@ from openpyxl.utils import column_index_from_string
 from .ingest import ingest
 from .layout import analyze
 from .model import (
+    CHECKBOX_MARK_FOLLOWS_OPTION,
+    CHECKBOX_MARK_PRECEDES_OPTION,
     PIPELINE_VERSION,
+    CheckboxConvention,
     InstanceRecord,
     InstanceStatus,
     LLMCall,
@@ -90,6 +94,103 @@ def validate_non_answer_columns(selectors) -> None:
         )
 
 
+def _normalize_checkbox_conventions(selectors) -> list[CheckboxConvention]:
+    """Normalise and validate `checkbox_conventions` selectors.
+
+    Accepts ``CheckboxConvention`` instances or plain dicts with the same keys;
+    raises ``ValueError`` naming the offending entry for any malformed form.
+    """
+    if selectors is None:
+        return []
+    if not isinstance(selectors, (list, tuple)):
+        raise ValueError("checkbox_conventions must be a list of selectors")
+    out: list[CheckboxConvention] = []
+    for i, sel in enumerate(selectors):
+        if isinstance(sel, CheckboxConvention):
+            out.append(sel)
+            continue
+        if isinstance(sel, dict):
+            unknown = set(sel) - {"tab", "anchor_pattern", "convention"}
+            if unknown:
+                raise ValueError(
+                    f"invalid checkbox_conventions selector keys: {sorted(unknown)}"
+                )
+            if "tab" not in sel:
+                raise ValueError(f"checkbox_conventions entry {i} is missing 'tab'")
+            try:
+                out.append(CheckboxConvention(**sel))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"invalid checkbox_conventions entry {i}: {exc}"
+                ) from exc
+            continue
+        raise ValueError(
+            f"invalid checkbox_conventions entry {i}: "
+            "expected a CheckboxConvention or a dict with "
+            "{tab, anchor_pattern, convention}"
+        )
+    _validate_checkbox_conventions(out)
+    return out
+
+
+def _validate_checkbox_conventions(conventions: list[CheckboxConvention]) -> None:
+    """Raise ``ValueError`` for a malformed or conflicting convention list."""
+    for i, c in enumerate(conventions):
+        if not isinstance(c.tab, str) or not c.tab:
+            raise ValueError(
+                f"checkbox_conventions entry {i} 'tab' must be a non-empty string"
+            )
+        if c.anchor_pattern is not None:
+            if not isinstance(c.anchor_pattern, str):
+                raise ValueError(
+                    f"checkbox_conventions entry {i} 'anchor_pattern' must be "
+                    "a string or None"
+                )
+            if len(c.anchor_pattern) > 200:
+                raise ValueError(
+                    f"checkbox_conventions entry {i} 'anchor_pattern' exceeds "
+                    "200 characters"
+                )
+            try:
+                re.compile(c.anchor_pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"checkbox_conventions entry {i} has an invalid regex: {exc}"
+                ) from exc
+
+    by_selector: dict[tuple[str, str | None], list[CheckboxConvention]] = {}
+    for c in conventions:
+        by_selector.setdefault((c.tab, c.anchor_pattern), []).append(c)
+    for (tab, anchor), group in by_selector.items():
+        distinct = {c.convention for c in group}
+        if len(distinct) > 1:
+            raise ValueError(
+                f"conflicting checkbox_conventions on tab {tab!r} "
+                f"anchor_pattern {anchor!r} tie on specificity: "
+                f"{sorted(distinct)}"
+            )
+
+
+def _canonical_checkbox_conventions(selectors) -> list[dict[str, str | None]]:
+    normalized = _normalize_checkbox_conventions(selectors)
+    items = [
+        {
+            "tab": c.tab,
+            "anchor_pattern": c.anchor_pattern,
+            "convention": c.convention,
+        }
+        for c in normalized
+    ]
+    return sorted(
+        items,
+        key=lambda item: (
+            item["tab"],
+            item["anchor_pattern"] or "",
+            item["convention"],
+        ),
+    )
+
+
 def _spreadsheet_column(element_id: str) -> int | None:
     try:
         return int(element_id.rsplit(":", 1)[1])
@@ -122,12 +223,16 @@ def compute_cache_key(
     params: dict[str, Any],
     include_hidden_sheets: bool = False,
     non_answer_columns: tuple[Any, ...] = (),
+    checkbox_conventions: tuple[Any, ...] = (),
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
     ).hexdigest()
     non_answer_hash = hashlib.sha256(
         canonical_json(_canonical_non_answer_columns(non_answer_columns)).encode("utf-8")
+    ).hexdigest()
+    conventions_hash = hashlib.sha256(
+        canonical_json(_canonical_checkbox_conventions(checkbox_conventions)).encode("utf-8")
     ).hexdigest()
     parts = "|".join(
         [
@@ -139,6 +244,7 @@ def compute_cache_key(
             "1" if include_hidden_sheets else "0",
             params_hash,
             non_answer_hash,
+            conventions_hash,
         ]
     )
     return hashlib.sha256(parts.encode("utf-8")).hexdigest()
@@ -151,6 +257,7 @@ class PipelineConfig:
     purpose: str = "cold_binding"
     include_hidden_sheets: bool = False
     non_answer_columns: list[Any] = field(default_factory=list)
+    checkbox_conventions: list[Any] = field(default_factory=list)
 
 
 class Pipeline:
@@ -164,6 +271,9 @@ class Pipeline:
         self.llm_client = llm_client
         self.config = config or PipelineConfig()
         validate_non_answer_columns(self.config.non_answer_columns)
+        self._checkbox_conventions = _normalize_checkbox_conventions(
+            self.config.checkbox_conventions
+        )
 
     def run(
         self, path: str | Path, batch_id: str | None = None, *, force: bool = False
@@ -179,6 +289,7 @@ class Pipeline:
             params=self.config.params,
             include_hidden_sheets=self.config.include_hidden_sheets,
             non_answer_columns=tuple(self.config.non_answer_columns),
+            checkbox_conventions=tuple(self._checkbox_conventions),
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -269,6 +380,7 @@ class Pipeline:
                         elements_by_id={e.element_id: e for e in elements},
                         tabs=tabs,
                         non_answer_element_ids=non_answer_ids,
+                        checkbox_conventions=self._checkbox_conventions,
                     )
                 except Exception as exc:  # noqa: BLE001
                     status = InstanceStatus.PARTIAL

@@ -14,6 +14,7 @@ def test_manifest_loads():
     assert [i.item_id for i in manifest.items] == [
         "spec_fragment_pdf",
         "spec_fragment_xlsx",
+        "spec_fragment_convention_xlsx",
     ]
     item = manifest.items[0]
     assert item.synthetic == "spec_fragment_pdf"
@@ -36,19 +37,19 @@ def test_run_manifest_canned(tmp_path):
     )
 
     agg = report["aggregate"]
-    assert agg["items_run"] == 2
+    assert agg["items_run"] == 3
     assert agg["region_type_accuracy"] == 1.0
     assert agg["anchors"]["f1"] == 1.0
     assert agg["binding"]["f1"] == 1.0
-    assert agg["binding"]["tp"] == 8
+    assert agg["binding"]["tp"] == 9
     assert agg["field_id_coverage"] == 1.0
     assert agg["field_ids_unique"] is True
     assert agg["mark_selection_accuracy"] == 1.0
     assert agg["silent_selection_rate"] == 0.0
     assert agg["silent_selection_numerator"] == 0
-    assert agg["silent_selection_denominator"] == 4
+    assert agg["silent_selection_denominator"] == 5
     assert agg["items_skipped"] == 0
-    assert agg["llm_calls"] == 2
+    assert agg["llm_calls"] == 3
     assert agg["budgets_ok"] is True
     assert all(i["status"] == "complete" for i in report["items"])
 
@@ -61,10 +62,35 @@ def test_run_manifest_without_llm(tmp_path):
     agg = report["aggregate"]
     assert agg["llm_calls"] == 0
     assert agg["binding"]["f1"] == 0.0
-    assert agg["binding"]["fn"] == 8
+    assert agg["binding"]["fn"] == 9
     assert agg["field_id_coverage"] is None
     assert agg["field_ids_unique"] is True
     # perception is independent of the LLM
     assert agg["region_type_accuracy"] == 1.0
     assert agg["anchors"]["f1"] == 1.0
     assert all(i["status"] == "partial" for i in report["items"])
+
+
+def test_golden_has_a_declared_convention_positive(tmp_path):
+    from formextract.evals.canned import client_for
+    from formextract.pipeline import Pipeline, PipelineConfig
+    from formextract.store import Store
+
+    manifest = load_manifest(MANIFEST)
+    item = next(
+        i for i in manifest.items if i.item_id == "spec_fragment_convention_xlsx"
+    )
+    path = item.resolve_path(manifest.base_dir, tmp_path / "fixtures")
+    client = client_for(item.item_id)
+    pipeline = Pipeline(
+        Store(tmp_path / "store"),
+        client,
+        PipelineConfig(model="canned", checkbox_conventions=item.checkbox_conventions),
+    )
+    record = pipeline.run(path)
+
+    field = next(f for f in record.fields if f.label_text == "Priority")
+    assert [o.selected for o in field.options] == [True, None]
+    assert field.value_normalized == "Low"
+    assert field.ambiguity is None
+    assert field.provenance.review_flag is False

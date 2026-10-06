@@ -160,14 +160,47 @@ model. A control has three honest states:
 - **ambiguous** — a marker between two options (or a right-only marker with a
   competitor) is recorded as null with `provenance.review_flag=True`,
   `ReviewReason.AMBIGUOUS_MARK`, and `Field.ambiguity` naming the marker and its
-  candidates. Between-markers need a declared convention (coming in 0.4.0);
-  until then they stay null.
+  candidates. Between-markers stay null unless the caller declares a
+  convention.
+
+Declare which way a between-marker points for a form family with
+`PipelineConfig.checkbox_conventions`:
+
+```python
+PipelineConfig(checkbox_conventions=[
+    {"tab": "Checklist", "anchor_pattern": r"^(yes|no|priority)$",
+     "convention": "mark_follows_option"},
+])
+```
+
+`tab` is an exact sheet name or an `fnmatch` glob; `anchor_pattern` is a regex
+matched against the normalised label/anchor text of the control (`None` matches
+every control on the tab). `mark_follows_option` means the marker belongs to the
+option on its left (`Low X High` → `Low`); `mark_precedes_option` means it
+belongs to the option on its right (`Low X High` → `High`). When several
+conventions match one control the most specific wins: `anchor_pattern` beats
+`None`, a literal tab beats a glob, and a longer tab beats a shorter. A
+declaration the geometry cannot support (it requires an option on a side where
+there is none) selects nothing and flags the control for review. The model
+never supplies or overrides a convention.
 
 Declare columns that hold reference/tag words (never answers) with
 `PipelineConfig(non_answer_columns=["Z"])` or
 `PipelineConfig(non_answer_columns=[{"tab": "CHC*", "column": "Z"}])`. Text in
 those columns is projected as annotations only and is never a marker or an
 option candidate.
+
+## Checking a real workbook safely
+
+`python -m formextract.evals.structure_probe <path.xlsx>
+[--conventions <json>]` prints one JSON object of integers only (plus one
+boolean check field): tab and hidden-tab counts, markers per geometric class
+(`right_only`, `between`, `left_only`, `unattached`), markers inside declared
+non-answer columns, controls ambiguous / auto-selected / selected by a declared
+convention, review-flag count, and per-tab region counts in tab order. It runs
+only the deterministic ingest and layout (no model, no network, no store
+writes) and prints no label, answer, element text, address, bbox, sheet name or
+file name, so the owner can commit the output without committing source data.
 
 ## Repository layout
 

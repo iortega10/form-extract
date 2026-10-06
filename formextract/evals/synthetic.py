@@ -117,9 +117,27 @@ def build_spec_fragment_xlsx(dest: Path) -> Path:
     return path
 
 
+def build_spec_fragment_convention_xlsx(dest: Path) -> Path:
+    import openpyxl
+
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / "spec_fragment_convention.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Declaration"
+    ws["A1"] = "Priority"
+    ws["F1"] = "Low"
+    ws["G1"] = "X"
+    ws["H1"] = "High"
+    wb.save(str(path))
+    wb.close()
+    return path
+
+
 FACTORIES: dict[str, Callable[[Path], Path]] = {
     "spec_fragment_pdf": build_spec_fragment_pdf,
     "spec_fragment_xlsx": build_spec_fragment_xlsx,
+    "spec_fragment_convention_xlsx": build_spec_fragment_convention_xlsx,
 }
 
 

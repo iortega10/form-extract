@@ -52,6 +52,10 @@ class ReviewReason(str, Enum):
 # rather than new ReviewReason members, so SCHEMA_VERSION does not move.
 AMBIGUITY_BETWEEN_OPTIONS = "between_options"
 AMBIGUITY_COMPETING_OPTIONS = "competing_options"
+AMBIGUITY_CONVENTION_UNSUPPORTED = "convention_unsupported_by_geometry"
+
+CHECKBOX_MARK_PRECEDES_OPTION = "mark_precedes_option"
+CHECKBOX_MARK_FOLLOWS_OPTION = "mark_follows_option"
 
 
 class GlyphKind(str, Enum):
@@ -181,6 +185,31 @@ class MarkerClassification:
     @property
     def candidate_element_ids(self) -> list[str]:
         return [*self.left_candidate_element_ids, *self.right_candidate_element_ids]
+
+
+@dataclass(frozen=True)
+class CheckboxConvention:
+    """A caller-declared convention for markers that sit between two options.
+
+    The selector is the tab (exact name or ``fnmatch`` glob) plus an optional
+    regex matched against the normalised anchor/label text of the control the
+    marker belongs to. ``None`` matches every control on the tab.
+    """
+
+    tab: str
+    anchor_pattern: str | None = None
+    convention: str = CHECKBOX_MARK_PRECEDES_OPTION
+
+    def __post_init__(self) -> None:
+        if self.convention not in (
+            CHECKBOX_MARK_PRECEDES_OPTION,
+            CHECKBOX_MARK_FOLLOWS_OPTION,
+        ):
+            raise ValueError(
+                f"unknown checkbox convention {self.convention!r}; expected "
+                f"{CHECKBOX_MARK_PRECEDES_OPTION!r} or "
+                f"{CHECKBOX_MARK_FOLLOWS_OPTION!r}"
+            )
 
 
 @dataclass

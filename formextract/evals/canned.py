@@ -79,6 +79,53 @@ def spec_fragment_response() -> str:
     return json.dumps({"fields": SPEC_FRAGMENT_FIELDS})
 
 
+_CONVENTION_LABEL_REGION = "p0:c0:field-row:priority"
+_CONVENTION_OPTIONS_REGION = "p0:c1:field-row:low_x_high"
+
+
+def spec_fragment_convention_xlsx_response() -> str:
+    return json.dumps(
+        {
+            "fields": [
+                {
+                    "label": "Priority",
+                    "control_type": "single_select",
+                    "options": [
+                        {"text": "Low", "selected": False},
+                        {"text": "High", "selected": False},
+                    ],
+                    "answer": [],
+                    "annotations": [],
+                    "region_id": _CONVENTION_LABEL_REGION,
+                    "source_elements": [
+                        {
+                            "region_id": _CONVENTION_LABEL_REGION,
+                            "band_id": 0,
+                            "segment_index": 0,
+                        },
+                        {
+                            "region_id": _CONVENTION_OPTIONS_REGION,
+                            "band_id": 0,
+                            "segment_index": 0,
+                        },
+                        {
+                            "region_id": _CONVENTION_OPTIONS_REGION,
+                            "band_id": 0,
+                            "segment_index": 1,
+                        },
+                        {
+                            "region_id": _CONVENTION_OPTIONS_REGION,
+                            "band_id": 0,
+                            "segment_index": 2,
+                        },
+                    ],
+                    "confidence": 0.9,
+                }
+            ]
+        }
+    )
+
+
 class CannedLLMClient:
     def __init__(self, response_text: str, model: str = "canned", tokens: int = 500):
         self.response_text = response_text
@@ -98,6 +145,7 @@ class CannedLLMClient:
 _CANNED = {
     "spec_fragment_pdf": spec_fragment_response,
     "spec_fragment_xlsx": spec_fragment_response,
+    "spec_fragment_convention_xlsx": spec_fragment_convention_xlsx_response,
 }
 
 
