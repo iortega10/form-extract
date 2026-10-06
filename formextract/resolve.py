@@ -9,7 +9,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from .layout import strip_marks
 from .model import (
+    AMBIGUITY_BETWEEN_OPTIONS,
+    AMBIGUITY_COMPETING_OPTIONS,
     AuthoredBy,
     BBox,
     BindingDraft,
@@ -18,8 +21,11 @@ from .model import (
     Element,
     ElementRef,
     Field,
+    FieldAmbiguity,
     LayoutResult,
     LLMCall,
+    MarkerClass,
+    MarkerClassification,
     Option,
     Provenance,
     ProvenanceSource,
@@ -39,7 +45,8 @@ BINDING_OUTPUT_CONTRACT = """{"fields": [
    "address": {"anchor_text": str, "column": int, "row_band": int, "offset_right": int},
    "confidence": number}]}"""
 
-PROMPT_VERSION = "1"
+PROMPT_VERSION = "2"
+GEOMETRIC_SELECTION_TOKEN = "marker_auto_select"
 
 TRANSPORT_MAX_ATTEMPTS = 3
 TRANSPORT_BACKOFF_SECONDS = 0.5
@@ -73,8 +80,13 @@ class ResolutionError:
 
 
 def project_chunks(
-    layout: LayoutResult, elements: list[Element], tabs: list[str]
+    layout: LayoutResult,
+    elements: list[Element],
+    tabs: list[str],
+    *,
+    non_answer_element_ids: set[str] | None = None,
 ) -> list[ProjectionChunk]:
+    non_answer_ids = non_answer_element_ids or set()
     by_id = {e.element_id: e for e in elements}
     by_page: dict[int, list[Region]] = {}
     for region in layout.regions:
@@ -91,13 +103,16 @@ def project_chunks(
             for band_id in region.band_ids:
                 if band_id >= len(bands):
                     continue
-                texts = [
-                    by_id[eid].text for eid in bands[band_id] if eid in by_id
-                ]
-                lines.append(
-                    f"- band {band_id}: "
-                    + " | ".join(f"{i}={t}" for i, t in enumerate(texts))
-                )
+                segments: list[str] = []
+                for i, eid in enumerate(bands[band_id]):
+                    if eid not in by_id:
+                        continue
+                    text = by_id[eid].text
+                    if eid in non_answer_ids:
+                        segments.append(f"{i}={text} [annotation]")
+                    else:
+                        segments.append(f"{i}={text}")
+                lines.append(f"- band {band_id}: " + " | ".join(segments))
             lines.append("")
         chunks.append(ProjectionChunk(key=tab, text="\n".join(lines).strip()))
     if not chunks and elements:
@@ -114,14 +129,19 @@ def build_prompt(chunk: ProjectionChunk) -> str:
         f"{BINDING_OUTPUT_CONTRACT}\n"
         "Rules:\n"
         "- A field is {label, control_type, options, answer, annotations}, not a label/value pair.\n"
-        "- 'X', a checkmark, or a checked box selects an option; resolve it from group "
-        "context (sibling options, select-all controls, repeating grids). A row of many "
-        "short options is multi_select; Yes/No siblings are single_select.\n"
+        "- Marks ('X', a checkmark, or a checked box) are DECIDED BY THE RESOLVER, not by "
+        "you. Label the control and list its options; you may return a selected flag, but "
+        "the resolver ignores it for ambiguous marks and cross-checks it for unambiguous "
+        "ones. A row of many short options is multi_select; Yes/No siblings are "
+        "single_select.\n"
         "- A '...All' control that selects an entire option grid belongs to that grid's "
         "field: answer includes \"ALL\" and the grid options are merged into that field.\n"
         "- Sub-instructions (e.g. 'if not all please check those that apply') and notes "
         "(e.g. 'Confirm on vendor portal', parenthetical instructions) are annotations, "
         "never answers. One field per user-visible question.\n"
+        "- Segments projected with a trailing `[annotation]` tag are in a caller-declared "
+        "non-answer column: treat them as annotations only, never as options, values, "
+        "answers or marks.\n"
         "- 'answer' holds the selected option texts (or the free text for text fields).\n"
         "- 'address' points at the anchor (left-column label text) and where the value "
         "lives relative to it: column index, band index within that column, and how many "
@@ -410,14 +430,122 @@ def _section_path(
     return [text for _, _, text in headers]
 
 
+@dataclass
+class _MarkDecision:
+    kind: str  # "auto_select" | "ambiguous" | "declining"
+    option_text: str | None = None
+    marker_element_id: str | None = None
+    candidate_element_ids: list[str] = field(default_factory=list)
+    reason: str | None = None
+
+
+def _match_option(option_text: str, options: list[Option]) -> str | None:
+    target = normalize_label(option_text)
+    if not target:
+        return None
+    for o in options:
+        if normalize_label(o.text) == target:
+            return o.text
+    for o in options:
+        candidate = normalize_label(o.text)
+        if candidate and (target.startswith(candidate) or candidate.startswith(target)):
+            return o.text
+    return None
+
+
+def _geometric_mark_decision(
+    draft: BindingDraft,
+    source_elements: list[str],
+    layout: LayoutResult,
+    elements_by_id: dict[str, Element],
+    non_answer_ids: set[str],
+) -> _MarkDecision | None:
+    """Decide a field's mark from layout classification, ignoring the model."""
+    glyph_ids = {g.element_id for g in layout.glyphs}
+    marker_by_id = {mc.marker_element_id: mc for mc in layout.marker_classes}
+
+    draft_glyph_ids = [
+        eid
+        for eid in source_elements
+        if eid in glyph_ids and eid not in non_answer_ids
+    ]
+    if not draft_glyph_ids:
+        return None
+
+    classifications = [
+        marker_by_id[eid] for eid in draft_glyph_ids if eid in marker_by_id
+    ]
+    unclassified = [eid for eid in draft_glyph_ids if eid not in marker_by_id]
+
+    between = [c for c in classifications if c.marker_class is MarkerClass.BETWEEN]
+    competing = [
+        c
+        for c in classifications
+        if c.marker_class is MarkerClass.RIGHT_ONLY
+        and len(c.right_candidate_element_ids) > 1
+    ]
+    right_only = [
+        c
+        for c in classifications
+        if c.marker_class is MarkerClass.RIGHT_ONLY
+        and len(c.right_candidate_element_ids) == 1
+        and not c.left_candidate_element_ids
+    ]
+
+    if between:
+        c = between[0]
+        return _MarkDecision(
+            kind="ambiguous",
+            marker_element_id=c.marker_element_id,
+            candidate_element_ids=c.candidate_element_ids,
+            reason=AMBIGUITY_BETWEEN_OPTIONS,
+        )
+    if competing:
+        c = competing[0]
+        return _MarkDecision(
+            kind="ambiguous",
+            marker_element_id=c.marker_element_id,
+            candidate_element_ids=c.candidate_element_ids,
+            reason=AMBIGUITY_COMPETING_OPTIONS,
+        )
+    if right_only:
+        c = right_only[0]
+        candidate = elements_by_id.get(c.right_candidate_element_ids[0])
+        option_text = strip_marks(candidate.text) if candidate is not None else None
+        if option_text is None:
+            return _MarkDecision(
+                kind="declining",
+                marker_element_id=c.marker_element_id,
+                candidate_element_ids=c.candidate_element_ids,
+            )
+        return _MarkDecision(
+            kind="auto_select",
+            option_text=option_text,
+            marker_element_id=c.marker_element_id,
+            candidate_element_ids=c.candidate_element_ids,
+        )
+    if classifications:
+        c = classifications[0]
+        return _MarkDecision(
+            kind="declining",
+            marker_element_id=c.marker_element_id,
+            candidate_element_ids=c.candidate_element_ids,
+        )
+    if unclassified:
+        return _MarkDecision(kind="declining", marker_element_id=unclassified[0])
+    return None
+
+
 def drafts_to_fields(
     drafts: list[BindingDraft],
     *,
     layout: LayoutResult | None = None,
     elements_by_id: dict[str, Element] | None = None,
     tabs: list[str] | None = None,
+    non_answer_element_ids: set[str] | None = None,
 ) -> list[Field]:
     elements_by_id = elements_by_id or {}
+    non_answer_ids = non_answer_element_ids or set()
     regions = layout.regions if layout else []
     region_by_id = {r.region_id: r for r in regions}
 
@@ -444,14 +572,6 @@ def drafts_to_fields(
             else:
                 normalizer = cf.normalizer_id
                 canonical = cf.name
-            selected = [o.text for o in draft.options if o.selected]
-            if draft.control_type is ControlType.TEXT:
-                value_raw = draft.answers[0] if draft.answers else None
-            elif selected:
-                value_raw = ", ".join(selected)
-            else:
-                value_raw = ", ".join(draft.answers) or None
-            value_normalized = normalize(normalizer, value_raw, draft.options)
 
             source_elements: list[str] = []
             unresolved: list[str] = []
@@ -481,6 +601,69 @@ def drafts_to_fields(
                     continue
                 source_elements.append(band[ref.band_id][ref.segment_index])
 
+            decision = (
+                _geometric_mark_decision(
+                    draft, source_elements, layout, elements_by_id, non_answer_ids
+                )
+                if layout is not None
+                else None
+            )
+
+            if decision is not None and decision.kind == "auto_select":
+                matched = _match_option(decision.option_text or "", draft.options)
+                if matched is None:
+                    decision = _MarkDecision(
+                        kind="declining",
+                        marker_element_id=decision.marker_element_id,
+                        candidate_element_ids=decision.candidate_element_ids,
+                    )
+                    options = [
+                        Option(
+                            text=o.text,
+                            selected=None,
+                            raw_span=o.raw_span,
+                            bbox=o.bbox,
+                        )
+                        for o in draft.options
+                    ]
+                else:
+                    options = [
+                        Option(
+                            text=o.text,
+                            selected=(o.text == matched),
+                            raw_span=o.raw_span,
+                            bbox=o.bbox,
+                        )
+                        for o in draft.options
+                    ]
+            elif decision is not None:
+                options = [
+                    Option(
+                        text=o.text,
+                        selected=None,
+                        raw_span=o.raw_span,
+                        bbox=o.bbox,
+                    )
+                    for o in draft.options
+                ]
+            else:
+                options = list(draft.options)
+
+            selected = [o.text for o in options if o.selected]
+            if decision is not None and decision.kind in ("ambiguous", "declining"):
+                value_raw = None
+            elif draft.control_type is ControlType.TEXT:
+                value_raw = draft.answers[0] if draft.answers else None
+            elif selected:
+                value_raw = ", ".join(selected)
+            else:
+                value_raw = ", ".join(draft.answers) or None
+            value_normalized = (
+                None
+                if decision is not None and decision.kind in ("ambiguous", "declining")
+                else normalize(normalizer, value_raw, options)
+            )
+
             provenance = Provenance(
                 source=ProvenanceSource.LLM,
                 binding_id=draft.draft_id,
@@ -489,6 +672,26 @@ def drafts_to_fields(
             if unresolved:
                 provenance.review_flag = True
                 provenance.review_reason = ReviewReason.UNRESOLVED_REFERENCE
+            if decision is not None and decision.kind in ("ambiguous", "declining"):
+                provenance.review_flag = True
+                provenance.review_reason = ReviewReason.AMBIGUOUS_MARK
+            if decision is not None and decision.kind == "auto_select":
+                provenance.heuristic_agreement.append(GEOMETRIC_SELECTION_TOKEN)
+                model_selected = [o.text for o in draft.options if o.selected]
+                geometric_selected = [o.text for o in options if o.selected]
+                if model_selected and {
+                    normalize_label(t) for t in model_selected
+                } != {normalize_label(t) for t in geometric_selected}:
+                    provenance.review_flag = True
+                    provenance.review_reason = ReviewReason.AMBIGUOUS_MARK
+
+            ambiguity = None
+            if decision is not None and decision.kind == "ambiguous":
+                ambiguity = FieldAmbiguity(
+                    marker_element_id=decision.marker_element_id,
+                    candidate_element_ids=decision.candidate_element_ids,
+                    reason=decision.reason,
+                )
 
             tab = None
             if region is not None:
@@ -503,7 +706,7 @@ def drafts_to_fields(
                     label_text=draft.label,
                     control_type=draft.control_type,
                     bbox=draft.bbox,
-                    options=draft.options,
+                    options=options,
                     answers=draft.answers,
                     annotations=draft.annotations,
                     region_ref=draft.region_id,
@@ -519,6 +722,7 @@ def drafts_to_fields(
                     ),
                     section_path=_section_path(region, layout, elements_by_id),
                     unresolved_source_refs=unresolved,
+                    ambiguity=ambiguity,
                 )
             )
     return fields

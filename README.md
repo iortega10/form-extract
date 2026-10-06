@@ -40,9 +40,10 @@ pip install "form-extract[pdf]"
 python -m pytest tests -q
 ```
 
-80 tests covering ingest, layout, schema normalization, store idempotency,
+100+ tests covering ingest, layout, schema normalization, store idempotency,
 resolve parsing, provenance/field identity, hidden sheets, the optional PDF
-backend, pipeline end-to-end, and eval-harness scoring.
+backend, checkbox marker classification, non-answer columns, pipeline
+end-to-end, and eval-harness scoring.
 
 ## Run the golden eval (against the bundled fixture)
 
@@ -146,6 +147,27 @@ from formextract.evals.synthetic import build
 
 pdf = build("spec_fragment_pdf", Path("fixtures"))   # also: spec_fragment_xlsx
 ```
+
+## Checkboxes
+
+Markers (`X`, checkmarks, checked boxes) are decided by the resolver, not the
+model. A control has three honest states:
+
+- **selected** — a unique right-only marker (box before label) auto-selects its
+  option.
+- **unmarked / null** — no marker and no explicit value is unanswered, never
+  `"false"`.
+- **ambiguous** — a marker between two options (or a right-only marker with a
+  competitor) is recorded as null with `provenance.review_flag=True`,
+  `ReviewReason.AMBIGUOUS_MARK`, and `Field.ambiguity` naming the marker and its
+  candidates. Between-markers need a declared convention (coming in 0.4.0);
+  until then they stay null.
+
+Declare columns that hold reference/tag words (never answers) with
+`PipelineConfig(non_answer_columns=["Z"])` or
+`PipelineConfig(non_answer_columns=[{"tab": "CHC*", "column": "Z"}])`. Text in
+those columns is projected as annotations only and is never a marker or an
+option candidate.
 
 ## Repository layout
 

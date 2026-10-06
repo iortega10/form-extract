@@ -22,6 +22,13 @@ def test_manifest_loads():
     assert item.cost.llm_calls == 1
 
 
+def test_golden_has_exactly_one_positive_checkbox_assertion():
+    manifest = load_manifest(MANIFEST)
+    for item in manifest.items:
+        positive = sum(len(f.selected_options) for f in item.golden.fields)
+        assert positive == 1
+
+
 def test_run_manifest_canned(tmp_path):
     out = tmp_path / "report.json"
     report = run_manifest(
@@ -36,6 +43,10 @@ def test_run_manifest_canned(tmp_path):
     assert agg["binding"]["tp"] == 8
     assert agg["field_id_coverage"] == 1.0
     assert agg["field_ids_unique"] is True
+    assert agg["mark_selection_accuracy"] == 1.0
+    assert agg["silent_selection_rate"] == 0.0
+    assert agg["silent_selection_numerator"] == 0
+    assert agg["silent_selection_denominator"] == 4
     assert agg["items_skipped"] == 0
     assert agg["llm_calls"] == 2
     assert agg["budgets_ok"] is True

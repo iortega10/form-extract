@@ -2,6 +2,7 @@
 glyph classification, candidate hypotheses, candidate anchors."""
 from __future__ import annotations
 
+import re
 import statistics
 from dataclasses import dataclass
 
@@ -13,6 +14,8 @@ from .model import (
     Glyph,
     GlyphKind,
     LayoutResult,
+    MarkerClass,
+    MarkerClassification,
     Region,
     RegionType,
 )
@@ -41,6 +44,15 @@ _HEADER_SIZE_FACTOR = 1.15
 # times the label band's height, so a full-height annotation block running
 # down the page can't be paired with a single-line label row.
 _VALUE_HEIGHT_FACTOR = 3.0
+# Marker classification: a candidate may be at most this many median column
+# widths (or inline gaps, whichever is larger) from the marker. Four columns
+# covers the census's "2 to 4 columns apart" between-markers.
+_GROUPING_WINDOW_COLUMNS = 4
+# Option labels are short; this stays below the prose threshold (150 chars)
+# while allowing the golden's merged "Support Order Log (…)" option cell.
+_OPTION_LABEL_MAX_CHARS = 100
+_BARE_NUMBER_RE = re.compile(r"^\d+(?:[.,]\d+)?%?$")
+_DATE_LOOKING_RE = re.compile(r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$")
 
 
 @dataclass
@@ -69,9 +81,14 @@ def _median(values: list[float], default: float = 1.0) -> float:
     return statistics.median(values) if values else default
 
 
-def _segment_columns(elements: list[Element]) -> list[tuple[float, float]]:
+def _median_inline_gap(elements: list[Element]) -> float:
+    """Median horizontal gap between vertically-overlapping adjacent elements.
+
+    Mirrors the column-segmentation gap metric: the smaller half of inline gaps
+    is used so one wide annotation gutter does not dominate.
+    """
     if not elements:
-        return []
+        return 0.0
     by_x = sorted(elements, key=lambda e: (e.bbox.x0, e.bbox.x1))
     inline_gaps: list[float] = []
     for i, a in enumerate(by_x):
@@ -79,7 +96,14 @@ def _segment_columns(elements: list[Element]) -> list[tuple[float, float]]:
             if b.bbox.x0 > a.bbox.x1 and a.bbox.overlaps_vertically(b.bbox):
                 inline_gaps.append(b.bbox.x0 - a.bbox.x1)
                 break
-    space = _median(sorted(inline_gaps)[: max(1, len(inline_gaps) // 2)], default=0.0)
+    return _median(sorted(inline_gaps)[: max(1, len(inline_gaps) // 2)], default=0.0)
+
+
+def _segment_columns(elements: list[Element]) -> list[tuple[float, float]]:
+    if not elements:
+        return []
+    by_x = sorted(elements, key=lambda e: (e.bbox.x0, e.bbox.x1))
+    space = _median_inline_gap(elements)
     tolerance = max(2.0 * space, 1e-6)
     runs: list[list[float]] = []
     for e in sorted(elements, key=lambda e: e.bbox.x0):
@@ -209,6 +233,168 @@ def _classify_glyphs(elements: list[Element], page: int) -> list[Glyph]:
             if kind is not None:
                 glyphs.append(Glyph(element_id=e.element_id, kind=kind, bbox=e.bbox))
     return glyphs
+
+
+def strip_marks(text: str) -> str:
+    """Return `text` with mark tokens removed (classification + resolution share it)."""
+    return " ".join(t for t in text.split() if t not in _MARKS).strip()
+
+
+def _option_text_if_option_like(text: str) -> str | None:
+    """Return the option-like portion of `text`, or None when it is not option-like."""
+    cleaned = strip_marks(text)
+    if not cleaned:
+        return None
+    if _BARE_NUMBER_RE.match(cleaned):
+        return None
+    if _DATE_LOOKING_RE.match(cleaned):
+        return None
+    if len(cleaned) > _OPTION_LABEL_MAX_CHARS:
+        return None
+    return cleaned
+
+
+def _is_option_like_element(element: Element, non_answer_ids: set[str]) -> bool:
+    if element.element_id in non_answer_ids:
+        return False
+    if not element.text.strip():
+        return False
+    # An element that itself contains a mark is a control, not an option label.
+    if any(t in _MARKS for t in element.text.split()):
+        return False
+    return _option_text_if_option_like(element.text) is not None
+
+
+def _band_representative_id(band: _Band) -> str:
+    return band.elements[0].element_id
+
+
+def _band_is_option_candidate(band: _Band, non_answer_ids: set[str]) -> bool:
+    texts = [e.text for e in band.elements if e.element_id not in non_answer_ids]
+    if any(t in _MARKS for text in texts for t in text.split()):
+        return False
+    return _option_text_if_option_like(" ".join(texts)) is not None
+
+
+def _classify_markers(
+    bands: dict[int, list[_Band]],
+    band_types: dict[int, list[RegionType]],
+    glyphs: list[Glyph],
+    tol_y: float,
+    grouping_window_x: float,
+    non_answer_ids: set[str],
+    anchor_column: int | None,
+) -> list[MarkerClassification]:
+    """Classify every marker in a FIELD_ROW band from geometry alone.
+
+    Candidates are option-like bands in the same row group (the layout's own
+    `tol_y`) within `grouping_window_x` horizontally, excluding the anchor
+    (label) column. Word-level PDF text is grouped by band so a multi-word
+    option phrase is one candidate. The marker's own band also contributes the
+    mark's merged text plus adjacent non-mark elements.
+    """
+    element_by_id: dict[str, Element] = {}
+    band_of_element: dict[str, _Band] = {}
+    all_bands: list[_Band] = []
+    for col, col_bands in bands.items():
+        for band in col_bands:
+            for e in band.elements:
+                element_by_id[e.element_id] = e
+                band_of_element[e.element_id] = band
+            all_bands.append(band)
+
+    out: list[MarkerClassification] = []
+    for g in glyphs:
+        marker = element_by_id.get(g.element_id)
+        if marker is None or g.element_id in non_answer_ids:
+            continue
+        marker_band = band_of_element.get(g.element_id)
+        if marker_band is None or band_types[marker_band.column][marker_band.index] is not RegionType.FIELD_ROW:
+            continue
+
+        left_ids: list[str] = []
+        right_ids: list[str] = []
+
+        # The mark's own merged text (e.g. "X Support Order Log (…)") plus any
+        # non-mark neighbours in the same band.
+        tokens = marker.text.split()
+        mark_pos = [i for i, t in enumerate(tokens) if t in _MARKS]
+        same_text = _option_text_if_option_like(marker.text)
+        if same_text and mark_pos:
+            non_mark_pos = [i for i, t in enumerate(tokens) if t not in _MARKS]
+            if non_mark_pos and non_mark_pos[0] > mark_pos[0]:
+                right_ids.append(marker.element_id)
+            elif non_mark_pos and non_mark_pos[-1] < mark_pos[0]:
+                left_ids.append(marker.element_id)
+
+        own_runs: list[tuple[str, list[Element]]] = []
+        current_side: str | None = None
+        current_run: list[Element] = []
+        for other in sorted(marker_band.elements, key=lambda e: e.bbox.x0):
+            if other.element_id == g.element_id or other.element_id in non_answer_ids:
+                continue
+            if any(t in _MARKS for t in other.text.split()):
+                continue
+            side = "left" if other.bbox.center_x < marker.bbox.center_x else "right"
+            # Word-level (PDF) neighbours in a line merge into one phrase; a
+            # spreadsheet cell (sheet set) is always its own candidate.
+            if current_run and (side != current_side or other.sheet is not None):
+                own_runs.append((current_side, current_run))  # type: ignore[arg-type]
+                current_run = []
+            current_side = side
+            current_run.append(other)
+        if current_run and current_side is not None:
+            own_runs.append((current_side, current_run))
+        for side, run in own_runs:
+            ordered = sorted(run, key=lambda e: e.bbox.x0)
+            if _option_text_if_option_like(" ".join(e.text for e in ordered)) is None:
+                continue
+            if side == "left":
+                left_ids.append(ordered[0].element_id)
+            else:
+                right_ids.append(ordered[0].element_id)
+
+        for band in all_bands:
+            if band is marker_band or band.column == anchor_column:
+                continue
+            if abs(band.bbox.center_y - marker.bbox.center_y) > tol_y:
+                continue
+            dx = band.bbox.center_x - marker.bbox.center_x
+            if abs(dx) > grouping_window_x:
+                continue
+            if not _band_is_option_candidate(band, non_answer_ids):
+                continue
+            if dx < 0:
+                left_ids.append(_band_representative_id(band))
+            else:
+                right_ids.append(_band_representative_id(band))
+
+        left_ids = sorted(
+            set(left_ids),
+            key=lambda eid: element_by_id[eid].bbox.center_x,
+            reverse=True,
+        )
+        right_ids = sorted(
+            set(right_ids),
+            key=lambda eid: element_by_id[eid].bbox.center_x,
+        )
+        if left_ids and right_ids:
+            cls = MarkerClass.BETWEEN
+        elif right_ids and not left_ids:
+            cls = MarkerClass.RIGHT_ONLY
+        elif left_ids and not right_ids:
+            cls = MarkerClass.LEFT_ONLY
+        else:
+            cls = MarkerClass.UNATTACHED
+        out.append(
+            MarkerClassification(
+                marker_element_id=g.element_id,
+                marker_class=cls,
+                left_candidate_element_ids=left_ids,
+                right_candidate_element_ids=right_ids,
+            )
+        )
+    return out
 
 
 def _control_guesses(
@@ -389,7 +575,10 @@ def _make_anchors(
     return anchors
 
 
-def analyze(elements: list[Element]) -> LayoutResult:
+def analyze(
+    elements: list[Element], *, non_answer_element_ids: set[str] | None = None
+) -> LayoutResult:
+    non_answer_ids = non_answer_element_ids or set()
     by_page: dict[int, list[Element]] = {}
     for e in elements:
         by_page.setdefault(e.bbox.page, []).append(e)
@@ -398,6 +587,7 @@ def analyze(elements: list[Element]) -> LayoutResult:
     all_hypotheses: list[CandidateHypothesis] = []
     all_glyphs: list[Glyph] = []
     all_anchors = []
+    all_marker_classes: list[MarkerClassification] = []
     columns: dict[int, list[int]] = {}
     bands_out: dict[int, list[list[str]]] = {}
     used_ids: set[str] = set()
@@ -421,10 +611,26 @@ def analyze(elements: list[Element]) -> LayoutResult:
         hypotheses = _make_hypotheses(bands, band_types, regions, glyphs, tol_y)
         anchors = _make_anchors(bands, band_types, regions, page)
 
+        col_widths = [x1 - x0 for x0, x1 in page_columns]
+        col_width_median = _median(col_widths, default=1.0)
+        gap_median = _median_inline_gap(page_elements)
+        grouping_window_x = _GROUPING_WINDOW_COLUMNS * max(col_width_median, gap_median, 1e-6)
+        anchor_column = _anchor_source_column(bands, band_types)
+        marker_classes = _classify_markers(
+            bands,
+            band_types,
+            glyphs,
+            tol_y,
+            grouping_window_x,
+            non_answer_ids,
+            anchor_column,
+        )
+
         all_regions.extend(regions)
         all_hypotheses.extend(hypotheses)
         all_glyphs.extend(glyphs)
         all_anchors.extend(anchors)
+        all_marker_classes.extend(marker_classes)
         for col, col_bands in bands.items():
             key = page * 1000 + col
             columns[key] = [e.element_id for b in col_bands for e in b.elements]
@@ -438,5 +644,6 @@ def analyze(elements: list[Element]) -> LayoutResult:
         glyphs=all_glyphs,
         hypotheses=all_hypotheses,
         anchors=all_anchors,
+        marker_classes=all_marker_classes,
     )
 

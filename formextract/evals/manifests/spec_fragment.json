@@ -33,13 +33,13 @@
             "label": "Do they ship to Canada?",
             "canonical_name": "ships_to_canada",
             "control_type": "single_select",
-            "value": "false"
+            "value": null
           },
           {
             "label": "Vendor Status",
             "canonical_name": "vendor_status",
             "control_type": "single_select",
-            "value": "Provisional",
+            "value": null,
             "annotations": ["Confirm on vendor portal"]
           },
           {
@@ -47,6 +47,7 @@
             "canonical_name": "order_log_supported",
             "control_type": "bool",
             "value": "true",
+            "selected_options": ["Support Order Log"],
             "annotations": ["Check if the vendor is exporting its order log directly"]
           }
         ]
@@ -85,13 +86,13 @@
             "label": "Do they ship to Canada?",
             "canonical_name": "ships_to_canada",
             "control_type": "single_select",
-            "value": "false"
+            "value": null
           },
           {
             "label": "Vendor Status",
             "canonical_name": "vendor_status",
             "control_type": "single_select",
-            "value": "Provisional",
+            "value": null,
             "annotations": ["Confirm on vendor portal"]
           },
           {
@@ -99,6 +100,7 @@
             "canonical_name": "order_log_supported",
             "control_type": "bool",
             "value": "true",
+            "selected_options": ["Support Order Log"],
             "annotations": ["Check if the vendor is exporting its order log directly"]
           }
         ]

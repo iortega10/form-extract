@@ -25,6 +25,7 @@ class GoldenField:
     canonical_name: str | None = None
     value: str | None = None
     annotations: list[str] = field(default_factory=list)
+    selected_options: list[str] = field(default_factory=list)
 
 
 @dataclass

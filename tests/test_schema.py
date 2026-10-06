@@ -45,6 +45,18 @@ def test_unknown_normalizer_raises():
         normalize("nope", "x", [])
 
 
+def test_unmarked_option_is_none():
+    from formextract.model import Option
+
+    # A single_select with no mark and no explicit value is unanswered.
+    assert normalize("yes_no", None, [Option(text="Yes"), Option(text="No")]) is None
+    # A check control with no mark is unanswered, never a synthesised "false".
+    assert normalize("bool_check", None, [Option(text="Support Order Log")]) is None
+    # A free-text "No" typed by the filler IS an answer and stays "false".
+    assert normalize("bool_check", "No", [Option(text="Support Order Log")]) == "false"
+    assert normalize("bool_check", "false", []) == "false"
+
+
 def test_canonical_aliases():
     assert canonical_name("Which US states do they ship to") == "us_states_shipped"
     assert canonical_name("do they ship to canada?") == "ships_to_canada"

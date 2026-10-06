@@ -135,3 +135,73 @@ def test_same_row_value_pairing_skips_tall_annotation_blocks():
     h = next(h for h in layout.hypotheses if h.label_element_ids == ["lbl", "lbl2"])
     assert h.value_element_ids == ["val"]
     assert "note" not in h.value_element_ids
+
+
+def _marker_layout(rows):
+    from formextract.model import BBox
+
+    elements = []
+    for i, (label, spans) in enumerate(rows):
+        y = i * 30
+        elements.append(
+            Element(
+                element_id=f"label{i}",
+                text=label,
+                bbox=BBox(page=0, x0=0, y0=y, x1=60, y1=y + 10),
+            )
+        )
+        for x, text in spans:
+            elements.append(
+                Element(
+                    element_id=f"r{i}_{x}_{text}",
+                    text=text,
+                    bbox=BBox(page=0, x0=x, y0=y, x1=x + 10, y1=y + 10),
+                )
+            )
+    return analyze(elements)
+
+
+def test_marker_classes():
+    from formextract.model import MarkerClass
+
+    layout = _marker_layout(
+        [
+            ("Between adjacent", [(100, "Yes"), (120, "X"), (140, "No")]),
+            ("Between gap", [(100, "Opt1"), (180, "X"), (220, "Opt2")]),
+            ("Right only", [(100, "X"), (120, "Option")]),
+            ("Left only", [(100, "Option"), (120, "X")]),
+            ("Unattached", [(100, "X")]),
+        ]
+    )
+    by_marker = {mc.marker_element_id: mc.marker_class for mc in layout.marker_classes}
+    classes = list(by_marker.values())
+    assert MarkerClass.BETWEEN in classes
+    assert MarkerClass.RIGHT_ONLY in classes
+    assert MarkerClass.LEFT_ONLY in classes
+    assert MarkerClass.UNATTACHED in classes
+
+
+def test_adjacent_equidistant_marker_is_between():
+    from formextract.model import MarkerClass
+
+    layout = _marker_layout([("Q", [(100, "Yes"), (120, "X"), (140, "No")])])
+    assert len(layout.marker_classes) == 1
+    mc = layout.marker_classes[0]
+    assert mc.marker_class is MarkerClass.BETWEEN
+    assert len(mc.left_candidate_element_ids) == 1
+    assert len(mc.right_candidate_element_ids) == 1
+
+
+def test_option_like_predicate():
+    from formextract.layout import _is_option_like_element
+
+    def el(eid, text, x=0):
+        return Element(element_id=eid, text=text, bbox=BBox(x0=x, y0=0, x1=x + 10, y1=10))
+
+    assert _is_option_like_element(el("a", "Option"), set())
+    assert not _is_option_like_element(el("b", "123"), set())
+    assert not _is_option_like_element(el("c", "2024-01-01"), set())
+    assert not _is_option_like_element(el("d", "X"), set())
+    assert not _is_option_like_element(el("e", "X Option"), set())
+    assert not _is_option_like_element(el("f", ""), set())
+    assert not _is_option_like_element(el("g", "Option"), {"g"})

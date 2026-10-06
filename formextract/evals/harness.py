@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from ..ingest import ingest
-from ..model import BBox, InstanceRecord, Region
+from ..model import BBox, Field, InstanceRecord, Region
 from ..pipeline import Pipeline, PipelineConfig
+from ..resolve import GEOMETRIC_SELECTION_TOKEN
 from ..schema import normalize_label
 from ..store import Store
 from . import canned
@@ -36,6 +37,11 @@ class ItemReport:
     field_id_covered: int = 0
     field_id_total: int = 0
     field_ids_unique: bool = True
+    mark_selection_accuracy: float | None = None
+    mark_selection_correct: int = 0
+    mark_selection_total: int = 0
+    silent_selection_numerator: int = 0
+    silent_selection_denominator: int = 0
     llm_calls: int = 0
     tokens: int = 0
     budget_ok: bool = True
@@ -125,6 +131,43 @@ def _score_fields(golden: Golden, record: InstanceRecord) -> tuple[PRF, float | 
     return prf(tp, fp, fn), accuracy(correct, matched)
 
 
+def _score_mark_selections(golden: Golden, record: InstanceRecord) -> tuple[int, int]:
+    pred_map = {
+        _field_key(f.label_text, f.canonical_name): f for f in record.fields
+    }
+    golden_positive = 0
+    correct = 0
+    for key, g in {
+        _field_key(f.label, f.canonical_name): f for f in golden.fields
+    }.items():
+        expected = g.selected_options
+        if not expected:
+            continue
+        golden_positive += len(expected)
+        f = pred_map.get(key)
+        if f is None:
+            continue
+        predicted = {normalize_label(o.text) for o in f.options if o.selected}
+        correct += sum(1 for exp in expected if normalize_label(exp) in predicted)
+    return correct, golden_positive
+
+
+def _is_declared_selection(field: Field) -> bool:
+    return field.edited_by_human or GEOMETRIC_SELECTION_TOKEN in field.provenance.heuristic_agreement
+
+
+def _score_silent_selections(record: InstanceRecord) -> tuple[int, int]:
+    silent = 0
+    total = 0
+    for f in record.fields:
+        for o in f.options:
+            if o.selected:
+                total += 1
+                if not _is_declared_selection(f):
+                    silent += 1
+    return silent, total
+
+
 def score_item(item: GoldenItem, record: InstanceRecord, elements) -> ItemReport:
     report = ItemReport(
         item_id=item.item_id,
@@ -151,6 +194,17 @@ def score_item(item: GoldenItem, record: InstanceRecord, elements) -> ItemReport
     report.field_id_covered = sum(1 for f in record.fields if f.field_id)
     report.field_ids_unique = len({f.field_id for f in record.fields if f.field_id}) == len(
         record.fields
+    )
+
+    report.mark_selection_correct, report.mark_selection_total = _score_mark_selections(
+        item.golden, record
+    )
+    if report.mark_selection_total:
+        report.mark_selection_accuracy = (
+            report.mark_selection_correct / report.mark_selection_total
+        )
+    report.silent_selection_numerator, report.silent_selection_denominator = (
+        _score_silent_selections(record)
     )
 
     report.llm_calls = len(record.llm_calls)
@@ -218,6 +272,22 @@ def run_manifest(
                 sum(r.field_id_total for r in reports),
             ),
             "field_ids_unique": all(r.field_ids_unique for r in reports),
+            "mark_selection_accuracy": accuracy(
+                sum(r.mark_selection_correct for r in reports),
+                sum(r.mark_selection_total for r in reports),
+            ),
+            "silent_selection_rate": (
+                sum(r.silent_selection_numerator for r in reports)
+                / sum(r.silent_selection_denominator for r in reports)
+                if sum(r.silent_selection_denominator for r in reports)
+                else 0.0
+            ),
+            "silent_selection_numerator": sum(
+                r.silent_selection_numerator for r in reports
+            ),
+            "silent_selection_denominator": sum(
+                r.silent_selection_denominator for r in reports
+            ),
             "llm_calls": sum(r.llm_calls for r in reports),
             "tokens": sum(r.tokens for r in reports),
             "budgets_ok": all(r.budget_ok for r in reports),

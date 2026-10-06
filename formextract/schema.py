@@ -43,7 +43,8 @@ def _norm_bool_check(value_raw: str | None, options: list[Option]) -> str | None
         return "true"
     if value_raw is not None and normalize_label(value_raw) in ("false", "no"):
         return "false"
-    return "false" if options else (value_raw or None)
+    # An unmarked checkbox is unanswered (None), never a synthesised "false".
+    return None
 
 
 def _norm_state_list(value_raw: str | None, options: list[Option]) -> str | None:

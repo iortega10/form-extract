@@ -25,14 +25,30 @@ single schema version bump per output-changing release.
   the `[pdf]` extra. PDF ingest raises a typed `PdfBackendUnavailable` error
   with the install hint when the extra is absent, and the eval harness skips
   PDF items with a reported reason.
+- **Right-only marker auto-select.** A unique marker with an option-like
+  candidate only to its right is auto-selected geometrically; every other
+  selection is either declared or flagged for review.
+- **`non_answer_columns`.** `PipelineConfig(non_answer_columns=[...])` declares
+  spreadsheet columns (e.g. `"Z"` or `{"tab": "CHC*", "column": "Z"}`) whose
+  text is projected as annotations only and is never a marker or option.
 
 ### Changed
 
 - `SCHEMA_VERSION` bumped to `2` (schema additions only; every new attribute
   has a default so stored 0.1/0.2 records still load).
-- `compute_cache_key` now includes `include_hidden_sheets`.
+- An unmarked option control is now null instead of `"false"` (the old value
+  was a guess).
+- A marker between two options with no declared convention is now null with
+  `ambiguous_mark` and its candidates (previously a value that could differ
+  between runs).
+- `compute_cache_key` now includes `include_hidden_sheets` and
+  `non_answer_columns`.
 - A cached unparseable LLM original response now goes straight to the repair
   prompt instead of re-spending the original prompt.
+
+Expected visible effect on a real checklist: roughly two thirds of populated
+between-marked checkbox values become null until a convention is declared in
+0.4.0.
 
 ## 0.2.0
 

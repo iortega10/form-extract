@@ -1,12 +1,15 @@
 """Orchestration: ingest → perception → (cold-path authoring) → instance record."""
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from openpyxl.utils import column_index_from_string
 
 from .ingest import ingest
 from .layout import analyze
@@ -31,6 +34,84 @@ from .store import Store, canonical_json, content_hash
 _MIME = {".xlsx": "xlsx", ".pdf": "pdf"}
 
 
+def _valid_column_letters(column: str) -> bool:
+    return 1 <= len(column) <= 3 and column.isalpha()
+
+
+def _canonical_non_answer_columns(selectors) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for sel in selectors or []:
+        if isinstance(sel, str):
+            normalized.append({"tab": "*", "column": sel.upper()})
+        else:
+            normalized.append(
+                {"tab": sel.get("tab", "*"), "column": sel["column"].upper()}
+            )
+    return sorted(normalized, key=lambda item: (item["tab"], item["column"]))
+
+
+def validate_non_answer_columns(selectors) -> None:
+    """Raise ValueError for a malformed `non_answer_columns` selector.
+
+    Accepted shapes: ``"Z"`` (every tab) or ``{"tab": "CHC*", "column": "Z"}``.
+    """
+    if selectors is None:
+        return
+    if not isinstance(selectors, (list, tuple)):
+        raise ValueError("non_answer_columns must be a list of selectors")
+    for sel in selectors:
+        if isinstance(sel, str):
+            if not _valid_column_letters(sel.strip()):
+                raise ValueError(
+                    f"invalid non_answer_columns selector {sel!r}: "
+                    "column must be 1-3 letters"
+                )
+            continue
+        if isinstance(sel, dict):
+            unknown = set(sel) - {"tab", "column"}
+            if unknown:
+                raise ValueError(
+                    f"invalid non_answer_columns selector keys: {sorted(unknown)}"
+                )
+            column = sel.get("column")
+            if not isinstance(column, str) or not _valid_column_letters(column.strip()):
+                raise ValueError(
+                    "non_answer_columns selector 'column' must be 1-3 letters"
+                )
+            tab = sel.get("tab", "*")
+            if not isinstance(tab, str) or not tab:
+                raise ValueError(
+                    "non_answer_columns selector 'tab' must be a non-empty glob string"
+                )
+            continue
+        raise ValueError(
+            f"invalid non_answer_columns selector {sel!r}: "
+            "expected a column string or {'tab': glob, 'column': letters}"
+        )
+
+
+def _spreadsheet_column(element_id: str) -> int | None:
+    try:
+        return int(element_id.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _resolve_non_answer_element_ids(elements, selectors) -> set[str]:
+    out: set[str] = set()
+    for sel in selectors or []:
+        if isinstance(sel, str):
+            letters, tab_glob = sel, "*"
+        else:
+            letters, tab_glob = sel["column"], sel.get("tab", "*")
+        column_index = column_index_from_string(letters)
+        for e in elements:
+            if e.sheet is not None and fnmatch.fnmatch(e.sheet, tab_glob):
+                if _spreadsheet_column(e.element_id) == column_index:
+                    out.add(e.element_id)
+    return out
+
+
 def compute_cache_key(
     *,
     content_hash: str,
@@ -40,9 +121,13 @@ def compute_cache_key(
     model: str,
     params: dict[str, Any],
     include_hidden_sheets: bool = False,
+    non_answer_columns: tuple[Any, ...] = (),
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
+    ).hexdigest()
+    non_answer_hash = hashlib.sha256(
+        canonical_json(_canonical_non_answer_columns(non_answer_columns)).encode("utf-8")
     ).hexdigest()
     parts = "|".join(
         [
@@ -53,6 +138,7 @@ def compute_cache_key(
             model or "none",
             "1" if include_hidden_sheets else "0",
             params_hash,
+            non_answer_hash,
         ]
     )
     return hashlib.sha256(parts.encode("utf-8")).hexdigest()
@@ -64,6 +150,7 @@ class PipelineConfig:
     params: dict[str, Any] = field(default_factory=lambda: {"temperature": 0})
     purpose: str = "cold_binding"
     include_hidden_sheets: bool = False
+    non_answer_columns: list[Any] = field(default_factory=list)
 
 
 class Pipeline:
@@ -76,6 +163,7 @@ class Pipeline:
         self.store = store
         self.llm_client = llm_client
         self.config = config or PipelineConfig()
+        validate_non_answer_columns(self.config.non_answer_columns)
 
     def run(
         self, path: str | Path, batch_id: str | None = None, *, force: bool = False
@@ -90,6 +178,7 @@ class Pipeline:
             model=self.config.model if self.llm_client is not None else "none",
             params=self.config.params,
             include_hidden_sheets=self.config.include_hidden_sheets,
+            non_answer_columns=tuple(self.config.non_answer_columns),
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -156,9 +245,14 @@ class Pipeline:
                 if not self.config.include_hidden_sheets
                 else []
             )
-            layout = analyze(elements)
+            non_answer_ids = _resolve_non_answer_element_ids(
+                elements, self.config.non_answer_columns
+            )
+            layout = analyze(elements, non_answer_element_ids=non_answer_ids)
             if self.llm_client is not None:
-                chunks = project_chunks(layout, elements, tabs)
+                chunks = project_chunks(
+                    layout, elements, tabs, non_answer_element_ids=non_answer_ids
+                )
                 try:
                     drafts, calls, resolve_errors = author_drafts(
                         chunks,
@@ -174,6 +268,7 @@ class Pipeline:
                         layout=layout,
                         elements_by_id={e.element_id: e for e in elements},
                         tabs=tabs,
+                        non_answer_element_ids=non_answer_ids,
                     )
                 except Exception as exc:  # noqa: BLE001
                     status = InstanceStatus.PARTIAL

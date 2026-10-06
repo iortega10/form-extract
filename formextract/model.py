@@ -47,11 +47,25 @@ class ReviewReason(str, Enum):
     UNRESOLVED_REFERENCE = "unresolved_reference"
 
 
+# Closed reason set for FieldAmbiguity.reason (a marker's geometric class,
+# distinct from ReviewReason on provenance). Stored as strings in the record
+# rather than new ReviewReason members, so SCHEMA_VERSION does not move.
+AMBIGUITY_BETWEEN_OPTIONS = "between_options"
+AMBIGUITY_COMPETING_OPTIONS = "competing_options"
+
+
 class GlyphKind(str, Enum):
     CHECK = "check"
     CROSS = "cross"
     BOX = "box"
     NONE = "none"
+
+
+class MarkerClass(str, Enum):
+    RIGHT_ONLY = "right_only"
+    BETWEEN = "between"
+    LEFT_ONLY = "left_only"
+    UNATTACHED = "unattached"
 
 
 class InstanceStatus(str, Enum):
@@ -152,12 +166,34 @@ class ElementRef:
 
 
 @dataclass
+class MarkerClassification:
+    """Geometric class of one glyph marker plus its option candidates.
+
+    Derived during layout analysis; consumed by resolution, never stored in an
+    instance record.
+    """
+
+    marker_element_id: str
+    marker_class: MarkerClass
+    left_candidate_element_ids: list[str] = field(default_factory=list)
+    right_candidate_element_ids: list[str] = field(default_factory=list)
+
+    @property
+    def candidate_element_ids(self) -> list[str]:
+        return [*self.left_candidate_element_ids, *self.right_candidate_element_ids]
+
+
+@dataclass
 class FieldAmbiguity:
-    """Why a field's value could not be resolved unambiguously."""
+    """Why a field's value could not be resolved unambiguously.
+
+    `reason` is one of the AMBIGUITY_* string constants (between_options /
+    competing_options), widened from ReviewReason in B2 without a schema bump.
+    """
 
     marker_element_id: str | None = None
     candidate_element_ids: list[str] = field(default_factory=list)
-    reason: ReviewReason | None = None
+    reason: str | None = None
 
 
 @dataclass
@@ -288,6 +324,7 @@ class LayoutResult:
     glyphs: list[Glyph]
     hypotheses: list[CandidateHypothesis]
     anchors: list[Anchor]
+    marker_classes: list[MarkerClassification] = field(default_factory=list)
 
 
 @dataclass

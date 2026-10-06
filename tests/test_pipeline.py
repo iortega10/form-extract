@@ -19,8 +19,21 @@ def test_pipeline_end_to_end_canned(spec_pdf, store):
 
     by_canon = {f.canonical_name: f for f in record.fields}
     assert by_canon["us_states_shipped"].value_normalized == "ALL"
-    assert by_canon["ships_to_canada"].value_normalized == "false"
+    assert by_canon["ships_to_canada"].value_normalized is None
+    assert by_canon["vendor_status"].value_normalized is None
     assert by_canon["order_log_supported"].value_normalized == "true"
+
+    ships = by_canon["ships_to_canada"]
+    assert ships.provenance.review_flag is True
+    assert ships.provenance.review_reason.value == "ambiguous_mark"
+    assert ships.ambiguity is not None
+    assert ships.ambiguity.reason == "between_options"
+    assert all(o.selected is None for o in ships.options)
+
+    order_log = by_canon["order_log_supported"]
+    assert order_log.provenance.review_flag is False
+    assert order_log.provenance.heuristic_agreement == ["marker_auto_select"]
+    assert [o.selected for o in order_log.options] == [True]
 
     assert record.regions and record.anchors
     assert len(record.anchors) == 5
@@ -85,4 +98,30 @@ def test_pipeline_deterministic_across_stores(spec_xlsx, tmp_path):
     ]
     assert [f.section_path for f in first.fields] == [
         f.section_path for f in second.fields
+    ]
+
+
+def test_pipeline_two_runs_identical_modulo_volatile_ids(spec_xlsx, tmp_path):
+    def run():
+        import uuid
+
+        return Pipeline(
+            Store(tmp_path / uuid.uuid4().hex),
+            client_for("spec_fragment_xlsx"),
+            PipelineConfig(),
+        ).run(spec_xlsx)
+
+    first, second = run(), run()
+    assert first.instance_id != second.instance_id
+    assert first.run_id != second.run_id
+    assert [f.field_id for f in first.fields] == [f.field_id for f in second.fields]
+    assert [f.value_normalized for f in first.fields] == [
+        f.value_normalized for f in second.fields
+    ]
+    assert [f.provenance.review_flag for f in first.fields] == [
+        f.provenance.review_flag for f in second.fields
+    ]
+    assert [f.ambiguity for f in first.fields] == [f.ambiguity for f in second.fields]
+    assert [[o.selected for o in f.options] for f in first.fields] == [
+        [o.selected for o in f.options] for f in second.fields
     ]
