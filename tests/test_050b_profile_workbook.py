@@ -126,3 +126,30 @@ def test_profile_tool_prints_chunk_count_and_reuse_misses_without_names(
     assert "VisibleOne: prompt_chars" in named
     assert "reuse misses (equal geometry, differing anchors): 1" in named
     assert "VisibleOne vs VisibleTwo: anchors_symmetric_difference=2" in named
+
+
+def test_profile_tool_prints_integer_near_miss_data(tmp_path, monkeypatch, capsys):
+    path = _workbook(tmp_path / "wb.xlsx")
+    tool = _load_tool(monkeypatch)
+
+    prof = tool.profile(path)
+    pairs = tool.near_miss_pairs(prof)
+    assert len(pairs) == 1
+    _page_a, _page_b, intersection, union, total, symmetric_difference = pairs[0]
+    assert (intersection, union, total, symmetric_difference) == (0, 2, 2, 2)
+    assert tool.closest_pair_diff(pairs) == 2
+    assert tool.pairs_by_diff(pairs) == {2: 1}
+
+    monkeypatch.setattr(sys, "argv", ["profile_workbook.py", str(path), "--no-names"])
+    tool.main()
+    out = capsys.readouterr().out
+
+    assert "near-miss pairs (equal geometry): 1" in out
+    assert (
+        "page 1 vs page 2: anchors_intersection=0 anchors_union=2 "
+        "anchors_total=2 anchors_symmetric_difference=2" in out
+    )
+    assert "closest_pair_diff: 2" in out
+    assert "pairs_by_diff: 2=1" in out
+    for name in ("HiddenFirst", "VisibleOne", "VisibleTwo", "Alpha Log", "Order Log"):
+        assert name not in out

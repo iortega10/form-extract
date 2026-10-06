@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
+## Unreleased
+
+### Added
+
+- **Live provider probe (`tools/live_probe.py`).** A stdlib-only,
+  out-of-package tool that measures one provider call per projection chunk on a
+  real workbook (OpenAI-compatible or Gemini) and prints one JSON line of
+  numbers only: input/output/reasoning token counts, `seconds`,
+  tokens/second, finish-reason class, fields, parse errors, truncation,
+  unresolved refs, anchor and grid counts, and status/HTTP-error classes. The
+  key is read only from an environment variable, is never printed, stored or
+  placed in a URL (Gemini authenticates by header), a response body is never
+  printed, and prompt/response text reaches disk only under an explicit
+  `--dump`. `--tiny` measures the per-call floor. Covered by a hermetic
+  `http.server` test.
+- **Profiler near-miss data (`tools/profile_workbook.py`).** For every pair of
+  tabs with an equal geometry signature the profiler now prints the anchor
+  intersection, union, total and symmetric difference (integers only), plus
+  `closest_pair_diff` and a `pairs_by_diff` histogram, so near-match reuse can
+  be sized up without reading any label text.
+
 ## 0.5.0 (2026-10-06)
 
 ### Changed

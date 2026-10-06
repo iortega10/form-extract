@@ -258,6 +258,39 @@ from the call cache, while chunks with parse or field errors are re-sent.
 - One process per `Store` directory: two processes writing the same store are
   not supported.
 
+#### Measuring a provider before you commit to it
+
+`tools/live_probe.py` measures what one call to your provider actually costs on
+a real workbook, without touching the store: it ingests and projects the file
+with the package's own functions, calls the endpoint directly, and prints one
+JSON object per line of **numbers only** (input/output/reasoning token counts,
+`seconds`, tokens/second, finish-reason class, fields, parse errors,
+truncation, unresolved refs, anchors and status/HTTP-error classes). It never
+prints a label, an answer or a response body by construction.
+
+```console
+python tools/live_probe.py path/to/form.xlsx --provider openai --model gpt-4o-mini
+python tools/live_probe.py path/to/form.xlsx --provider gemini --model gemini-2.5-flash \
+    --tab 0 --param thinkingBudget=0
+```
+
+The key is read only from the environment variable named by `--env-var`
+(`OPENAI_API_KEY` / `GEMINI_API_KEY` by default); it is never printed, stored or
+placed in a URL, and an empty `--env-var ""` sends no auth header (Gemini
+authenticates by the `x-goog-api-key` header). `--base-url` points the OpenAI
+provider at any OpenAI-compatible endpoint. Other flags: `--param k=v`
+(repeatable; `thinkingBudget=N` maps to Gemini's
+`generationConfig.thinkingConfig`), `--max-tokens N`, `--tab N` (an index among
+the chunks, never a name), `--repeat K` (prints min/median/max, not K rows),
+`--workers N`, `--no-temperature` (omit `temperature` for reasoning models) and
+`--dump PATH` — the one path prompt/response text may be written to, only when
+explicitly requested.
+
+Recommended first run: `--tiny` sends a fixed ~10-token prompt and reports its
+seconds as `floor_seconds` (the per-call floor `F`), then one real tab measures
+the generation rate on top of it — start with thinking off
+(`--param thinkingBudget=0` on Gemini, or a non-reasoning model).
+
 ### 3. Test against the synthetic fixture directly
 
 ```python
