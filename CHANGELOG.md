@@ -24,6 +24,40 @@ single schema version bump per output-changing release.
   intersection, union, total and symmetric difference (integers only), plus
   `closest_pair_diff` and a `pairs_by_diff` histogram, so near-match reuse can
   be sized up without reading any label text.
+- **Row coverage (`formextract/coverage.py`, `InstanceRecord.coverage`).** Every
+  run with a client now records, per tab, `units_total` / `units_consumed` /
+  `ratio` over two model-free unit types — anchor rows and GRID regions — using
+  the model's *resolved* element refs as the numerator and ids only, never text.
+  `unbound` lists the units no field used (capped at 50, `unbound_truncated`
+  marks the cut); `record.coverage_min_ratio` is the minimum over eligible tabs.
+  `ratio: null` (no eligible units) is ineligible, never `1.0`. The block is
+  additive and defaulted, so `SCHEMA_VERSION` stays `"2"`. The live probe
+  (`tools/live_probe.py`) now reports the same numerator and denominator
+  (`units_consumed` / `units_total`, with `anchors` + `grid_units` splitting the
+  denominator) instead of its own ad-hoc count.
+- **`PipelineConfig.min_coverage`.** Opt-in, no default. When set, every
+  eligible tab with `ratio` below it appends one error
+  (`tab <name>: row coverage 0.05 < 0.50`) and the run becomes `partial`. A
+  rerun costs a recompute, not tokens: the `partial` record is not served from
+  the instance cache, but each chunk whose response parsed without field errors
+  is served from the call cache. `min_coverage` is part of
+  `compute_cache_key`.
+
+### Changed
+
+- **Deterministic order for drafts tied on an anchor band.** `drafts_to_fields`
+  now breaks a tie on the anchor band with the smallest `(band, segment)` the
+  draft cites, then the normalised label, then the draft's original position,
+  instead of leaving the model's response order (a stable-sort artefact) to
+  decide the `field_id` ordinals. This can change ordinals only for drafts tied
+  on an anchor band, and it re-orders region-less drafts (which share the
+  sentinel band) by label.
+- **Cache-key note.** `min_coverage` is appended to `compute_cache_key` only
+  when it is set, so every default-config key is byte-identical to 0.5.0's and
+  an instance cached by 0.5.0 is still served under the default config — it
+  simply carries `coverage=[]` until the cache is cleared or `force=True` is
+  used. That is the cost of not invalidating: the field is additive, so
+  `SCHEMA_VERSION` does not move.
 
 ## 0.5.0 (2026-10-06)
 

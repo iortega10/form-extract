@@ -408,6 +408,41 @@ class SourceInfo:
 
 
 @dataclass
+class UnboundUnit:
+    """One perceived anchor row or GRID region no resolved field used.
+
+    Ids only: no label text, no element text, so the handle can be logged.
+    """
+
+    region_id: str
+    band_id: int
+
+
+@dataclass
+class TabCoverage:
+    """Row coverage for one tab: the share of its perceived units a run used.
+
+    ``units_total`` is anchor rows plus GRID regions, after units whose
+    elements are all ``non_answer_columns`` ids are excluded. ``ratio`` is
+    ``None`` when ``units_total`` is 0 (ineligible, never ``1.0``). ``anchors``
+    and ``grid_regions`` count the units that survived that exclusion, and
+    ``max_anchors_per_tab`` is the anchor count of the largest authoring chunk.
+    This is a perception signal, not a quality score.
+    """
+
+    tab: str = ""
+    units_total: int = 0
+    units_consumed: int = 0
+    ratio: float | None = None
+    anchors: int = 0
+    grid_regions: int = 0
+    chunked: bool = False
+    max_anchors_per_tab: int = 0
+    unbound: list[UnboundUnit] = field(default_factory=list)
+    unbound_truncated: bool = False
+
+
+@dataclass
 class InstanceRecord:
     instance_id: str
     schema_version: str
@@ -428,6 +463,8 @@ class InstanceRecord:
     status: InstanceStatus = InstanceStatus.COMPLETE
     errors: list[str] = field(default_factory=list)
     idempotency_key: str = ""
+    coverage: list[TabCoverage] = field(default_factory=list)
+    coverage_min_ratio: float | None = None
 
 
 @dataclass

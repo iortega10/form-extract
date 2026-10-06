@@ -249,6 +249,37 @@ carry `provenance.review_flag` with a `provenance.review_reason` (for example
 of the same bytes: chunks whose response parsed with no field errors are served
 from the call cache, while chunks with parse or field errors are re-sent.
 
+**Row coverage.** Every record carries a `coverage` block: one entry per tab
+with `units_total`, `units_consumed` and `ratio`. A unit is one anchor row or
+one GRID region, and a unit counts as consumed when any element of its band
+lands in a field's resolved `source_elements`. So `ratio` is the share of the
+tab's anchor rows and grid regions that some field used — it is **not a
+quality score**, and by default it changes nothing: a run that consumed 5 of
+98 anchor rows still reads `complete`. A tab with no eligible units (for
+example one whose only column is listed in `non_answer_columns`) has
+`ratio: null`, which is ineligible — never `1.0`, never a failure. The
+`unbound` list gives the ids of the units no field used (capped at 50, with
+`unbound_truncated` marking the cut), so you can inspect what was missed
+without reading any label text.
+
+`PipelineConfig.min_coverage` is opt-in and has **no default** — nothing in a
+single workbook defends a number, so you pick one. Setting it makes such a run
+`partial` and adds one error per below-threshold tab (`tab <name>: row coverage
+0.05 < 0.50`); `ratio: null` tabs are ineligible and never fail.
+`record.coverage_min_ratio` is the minimum `ratio` over eligible tabs (`null`
+when none is eligible). A rerun after a `min_coverage` failure recomputes but
+spends almost nothing: a `partial` record is never served from the instance
+cache, yet each chunk whose response parsed without field errors is served from
+the call cache. Only a cached response that carried field-level errors is
+re-sent (it is archived unindexed).
+
+```python
+config = PipelineConfig(min_coverage=0.5)  # an example threshold, not a recommendation
+record = Pipeline(store, client, config).run("form.xlsx")
+for block in record.coverage:
+    print(block.tab, block.ratio, len(block.unbound))
+```
+
 **Pitfalls.**
 
 - `force=True` re-spends every call; it does not reuse the call cache.

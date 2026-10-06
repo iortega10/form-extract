@@ -94,10 +94,13 @@ def test_include_hidden_sheets_flag(tmp_path: Path):
 
     assert record.hidden_sheets == []
     assert record.tabs == ["Visible", "Hidden", "VeryHidden"]
+    # Region-less drafts (this test double omits `region_id`) are tied on the
+    # sentinel anchor band, so the deterministic secondary key orders them by
+    # normalised label rather than by the model's emission order.
     assert [f.label_text for f in record.fields] == [
-        "Field on Visible",
         "Field on Hidden",
         "Field on VeryHidden",
+        "Field on Visible",
     ]
 
 

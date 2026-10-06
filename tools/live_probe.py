@@ -30,9 +30,9 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from formextract.coverage import compute_coverage
 from formextract.ingest import ingest
 from formextract.layout import analyze
-from formextract.model import RegionType
 from formextract.pipeline import page_tabs_for
 from formextract.resolve import (
     ProjectionChunk,
@@ -75,7 +75,8 @@ BASE_KEYS = (
     "unresolved_refs",
     "anchors",
     "grid_units",
-    "anchors_consumed",
+    "units_consumed",
+    "units_total",
     "status_class",
     "http_error_class",
     "floor_seconds",
@@ -387,46 +388,29 @@ def _is_truncated(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# deterministic structure counts
+# row coverage (the same definition the package uses)
 # ---------------------------------------------------------------------------
-def _page_of(chunk: ProjectionChunk, index: int) -> int:
-    return chunk.page if chunk.page is not None else index
+def coverage_counts(
+    layout, elements_by_id: dict, fields: list, chunks: list[ProjectionChunk],
+    *, tabs: list[str], page_tabs: dict[int, str]
+) -> tuple[int, int, int, int]:
+    """(anchors, grid units, units consumed, units total) for the chunks' tabs.
 
-
-def _anchor_page(anchor_id: str) -> int:
-    prefix = anchor_id.split(":", 1)[0]
-    try:
-        return int(prefix[1:])
-    except (ValueError, IndexError):
-        return 0
-
-
-def structure_counts(layout, pages: set[int]) -> tuple[list, int]:
-    """(anchors on those pages, grid-region element count). Integers only."""
-    anchors = [
-        anchor for anchor in layout.anchors if _anchor_page(anchor.anchor_id) in pages
-    ]
-    grid_units = sum(
-        len(region.element_ids)
-        for region in layout.regions
-        if region.type is RegionType.GRID and region.bbox.page in pages
+    Delegates to ``formextract.coverage.compute_coverage`` so the probe reads
+    the same anchors + GRID-region denominator the pipeline reports, then keeps
+    only the tabs the selected chunks cover.
+    """
+    blocks = compute_coverage(
+        layout, elements_by_id, fields, page_tabs=page_tabs, tabs=tabs
     )
-    return anchors, grid_units
-
-
-def anchors_consumed(anchors: list, layout, resolved_ids: set[str]) -> int:
-    """Anchors whose own band holds any element a resolved field points at."""
-    consumed = 0
-    for anchor in anchors:
-        page = _anchor_page(anchor.anchor_id)
-        column = anchor.relative_address.column
-        band_id = anchor.relative_address.row_band
-        bands = layout.bands.get(page * 1000 + column, [])
-        if 0 <= band_id < len(bands) and any(
-            element_id in resolved_ids for element_id in bands[band_id]
-        ):
-            consumed += 1
-    return consumed
+    selected = {chunk.key for chunk in chunks}
+    blocks = [block for block in blocks if block.tab in selected]
+    return (
+        sum(block.anchors for block in blocks),
+        sum(block.grid_regions for block in blocks),
+        sum(block.units_consumed for block in blocks),
+        sum(block.units_total for block in blocks),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -447,8 +431,6 @@ def run_once(
     page_tabs: dict[int, str],
     workers: int,
     dump_entries: list | None,
-    anchor_objects: list,
-    grid_units: int,
 ) -> dict[str, Any]:
     prompts = [build_prompt(chunk, include_address=False) for chunk in chunks]
 
@@ -524,8 +506,10 @@ def run_once(
         tabs=tabs,
         page_tabs=page_tabs,
     )
-    resolved_ids = {element_id for field in fields for element_id in field.source_elements}
     unresolved_refs = sum(len(field.unresolved_source_refs) for field in fields)
+    anchors, grid_units, units_consumed, units_total = coverage_counts(
+        layout, elements_by_id, fields, chunks, tabs=tabs, page_tabs=page_tabs
+    )
 
     chunks_run = len(chunks)
     if chunks_run and chunks_ok == 0:
@@ -551,9 +535,10 @@ def run_once(
         "parse_errors": parse_errors,
         "truncated": truncated,
         "unresolved_refs": unresolved_refs,
-        "anchors": len(anchor_objects),
+        "anchors": anchors,
         "grid_units": grid_units,
-        "anchors_consumed": anchors_consumed(anchor_objects, layout, resolved_ids),
+        "units_consumed": units_consumed,
+        "units_total": units_total,
         "status_class": status_class,
         "http_error_class": http_error_class,
     }
@@ -725,10 +710,6 @@ def _execute(args, key: str, base_url: str, params: dict[str, Any]) -> dict[str,
     else:
         selected = chunks
 
-    anchor_objects, grid_units = structure_counts(
-        layout, {_page_of(chunk, index) for index, chunk in enumerate(selected)}
-    )
-
     elements_by_id = {element.element_id: element for element in elements}
     dump_entries: list | None = [] if args.dump else None
     bases = [
@@ -740,8 +721,6 @@ def _execute(args, key: str, base_url: str, params: dict[str, Any]) -> dict[str,
             page_tabs=page_tabs,
             workers=args.workers,
             dump_entries=dump_entries,
-            anchor_objects=anchor_objects,
-            grid_units=grid_units,
             **run_kwargs,
         )
         for _ in range(args.repeat)

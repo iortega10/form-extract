@@ -649,9 +649,31 @@ def _anchor_band_id(draft: BindingDraft, region_id: str | None) -> int | None:
     return None
 
 
-def _anchor_sort_key(draft: BindingDraft, region_id: str | None) -> int:
+def _anchor_sort_key(
+    draft: BindingDraft, region_id: str | None, position: int = 0
+) -> tuple[int, tuple[int, int], str, int]:
+    """Deterministic order for the drafts that share one region.
+
+    The primary key is the anchor band the draft cites inside its own region.
+    Drafts tied on that band used to keep the model's response order (the sort
+    is stable), so the output order depended on the order the model happened to
+    emit. The secondary key is the smallest (band, segment) the draft cites,
+    then the normalised label, then the draft's original position as the final
+    fallback, which fixes ``field_id`` ordinals for tied drafts.
+    """
     anchor = _anchor_band_id(draft, region_id)
-    return anchor if anchor is not None else 10**9
+    refs = draft.source_refs
+    smallest_ref = (
+        min((ref.band_id, ref.segment_index) for ref in refs)
+        if refs
+        else (10**9, 10**9)
+    )
+    return (
+        anchor if anchor is not None else 10**9,
+        smallest_ref,
+        normalize_label(draft.label),
+        position,
+    )
 
 
 def _field_id(
@@ -925,7 +947,13 @@ def drafts_to_fields(
     fields: list[Field] = []
     ordinal_by_region: dict[str | None, int] = {}
     for region_id, group in by_region.items():
-        group.sort(key=lambda d: _anchor_sort_key(d, region_id))
+        group = [
+            draft
+            for _position, draft in sorted(
+                enumerate(group),
+                key=lambda pair: _anchor_sort_key(pair[1], region_id, pair[0]),
+            )
+        ]
         for draft in group:
             region = region_by_id.get(region_id) if region_id is not None else None
             page = region.bbox.page if region else 0

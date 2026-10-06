@@ -13,6 +13,7 @@ from typing import Any
 
 from openpyxl.utils import column_index_from_string
 
+from .coverage import compute_coverage
 from .ingest import IngestResult, ingest
 from .layout import analyze, page_anchor_multiset, page_geometry_signature
 from .model import (
@@ -25,6 +26,7 @@ from .model import (
     LLMCall,
     SourceInfo,
     Span,
+    TabCoverage,
 )
 from .resolve import (
     LLMClient,
@@ -105,6 +107,16 @@ def validate_chunk_workers(value: int) -> None:
         raise ValueError("chunk_workers must be an integer between 1 and 32")
     if not 1 <= value <= 32:
         raise ValueError("chunk_workers must be between 1 and 32")
+
+
+def validate_min_coverage(value) -> None:
+    """Raise ValueError unless `min_coverage` is None or a number in (0, 1]."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("min_coverage must be None or a number in (0, 1]")
+    if not 0 < float(value) <= 1:
+        raise ValueError("min_coverage must be in (0, 1]")
 
 
 def _normalize_checkbox_conventions(selectors) -> list[CheckboxConvention]:
@@ -239,6 +251,7 @@ def compute_cache_key(
     checkbox_conventions: tuple[Any, ...] = (),
     reuse_layout_bindings: bool = False,
     include_address: bool = False,
+    min_coverage: float | None = None,
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
@@ -249,22 +262,26 @@ def compute_cache_key(
     conventions_hash = hashlib.sha256(
         canonical_json(_canonical_checkbox_conventions(checkbox_conventions)).encode("utf-8")
     ).hexdigest()
-    parts = "|".join(
-        [
-            content_hash,
-            pipeline_version,
-            schema_version,
-            prompt_version,
-            model or "none",
-            "1" if include_hidden_sheets else "0",
-            params_hash,
-            non_answer_hash,
-            conventions_hash,
-            "1" if reuse_layout_bindings else "0",
-            "1" if include_address else "0",
-        ]
-    )
-    return hashlib.sha256(parts.encode("utf-8")).hexdigest()
+    parts = [
+        content_hash,
+        pipeline_version,
+        schema_version,
+        prompt_version,
+        model or "none",
+        "1" if include_hidden_sheets else "0",
+        params_hash,
+        non_answer_hash,
+        conventions_hash,
+        "1" if reuse_layout_bindings else "0",
+        "1" if include_address else "0",
+    ]
+    # Appended only when set, so every default-config key stays byte-identical
+    # to 0.5.0's; an instance cached by 0.5.0 is still served under the default
+    # config (and carries coverage=[], the cost of not invalidating).
+    if min_coverage is not None:
+        parts.append(f"mincov={float(min_coverage)!r}")
+    joined = "|".join(parts)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def page_tabs_for(ing: IngestResult) -> dict[int, str]:
@@ -312,6 +329,11 @@ class PipelineConfig:
     saving; ``True`` restores the pre-0.5.0 prompt. ``chunk_workers`` (default
     ``1``, allowed 1..32) authors that many tabs at once, which cuts wall-clock
     time without changing per-call cost, and requires a thread-safe client.
+    ``min_coverage`` (default ``None``, opt-in) turns the per-tab row-coverage
+    block into a status rule: every eligible tab whose ratio is below it adds
+    one error and makes the run ``partial``. No threshold is defensible from one
+    file, so the integrator picks it; ``None`` leaves status and errors exactly
+    as they were before the block existed.
     """
 
     model: str = "gpt-4o-mini"
@@ -323,6 +345,7 @@ class PipelineConfig:
     reuse_layout_bindings: bool = False
     include_address: bool = False
     chunk_workers: int = 1
+    min_coverage: float | None = None
 
 
 class Pipeline:
@@ -337,6 +360,7 @@ class Pipeline:
         self.config = config or PipelineConfig()
         validate_non_answer_columns(self.config.non_answer_columns)
         validate_chunk_workers(self.config.chunk_workers)
+        validate_min_coverage(self.config.min_coverage)
         self._checkbox_conventions = _normalize_checkbox_conventions(
             self.config.checkbox_conventions
         )
@@ -476,6 +500,7 @@ class Pipeline:
             checkbox_conventions=tuple(self._checkbox_conventions),
             reuse_layout_bindings=self.config.reuse_layout_bindings,
             include_address=self.config.include_address,
+            min_coverage=self.config.min_coverage,
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -489,6 +514,8 @@ class Pipeline:
         layout = None
         tabs: list[str] = []
         hidden_sheets: list[str] = []
+        page_tabs: dict[int, str] | None = None
+        non_answer_ids: set[str] = set()
         source = SourceInfo(
             content_hash=chash,
             original_filename=path.name,
@@ -610,6 +637,28 @@ class Pipeline:
             status = InstanceStatus.PARTIAL
             errors.append("no fields resolved despite candidate hypotheses")
 
+        coverage: list[TabCoverage] = []
+        coverage_min_ratio: float | None = None
+        if self.llm_client is not None and layout is not None:
+            coverage = compute_coverage(
+                layout,
+                {e.element_id: e for e in elements},
+                fields,
+                page_tabs=page_tabs,
+                tabs=tabs,
+                non_answer_element_ids=non_answer_ids,
+            )
+            eligible = [c.ratio for c in coverage if c.ratio is not None]
+            coverage_min_ratio = min(eligible) if eligible else None
+            if self.config.min_coverage is not None:
+                for block in coverage:
+                    if block.ratio is not None and block.ratio < self.config.min_coverage:
+                        status = InstanceStatus.PARTIAL
+                        errors.append(
+                            f"tab {block.tab}: row coverage {block.ratio:.2f} "
+                            f"< {self.config.min_coverage:.2f}"
+                        )
+
         consumed_blob = " ".join(
             normalize_label(t)
             for f in fields
@@ -651,6 +700,8 @@ class Pipeline:
             status=status,
             errors=errors,
             idempotency_key=idempotency_key,
+            coverage=coverage,
+            coverage_min_ratio=coverage_min_ratio,
         )
         saved, _ = self.store.save_instance(record, overwrite=force)
         return saved

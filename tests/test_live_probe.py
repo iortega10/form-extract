@@ -182,6 +182,11 @@ def test_stdout_is_numbers_only_and_leaks_no_text(tmp_path, capsys):
         _assert_scalar(value)
     assert FIELD_LABEL not in out
     assert "control_type" not in out
+    # row coverage (T4): the denominator is anchors + GRID-region units, and
+    # the old ad-hoc key is gone
+    assert "anchors_consumed" not in data
+    assert data["units_total"] == data["anchors"] + data["grid_units"]
+    assert 0 <= data["units_consumed"] <= data["units_total"]
     assert "annotations" not in out
     assert data["chunks_run"] == 1
     assert data["fields"] == 1
