@@ -4,7 +4,10 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
-## Unreleased (0.3.0)
+## 0.3.0 (2026-10-05)
+
+This release also carries the 0.2.0 reliability work below: 0.2.0 was never tagged or
+published on its own.
 
 ### Added
 
@@ -50,7 +53,7 @@ Expected visible effect on a real checklist: roughly two thirds of populated
 between-marked checkbox values become null until a convention is declared in
 0.4.0.
 
-## 0.2.0
+## 0.2.0 (not released separately; included in 0.3.0)
 
 ### Added
 
