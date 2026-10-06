@@ -47,7 +47,7 @@ def test_save_instance_no_overwrite_on_collision(store):
     rec = _record("hash1")
     saved, created = store.save_instance(rec)
     assert created is True
-    assert store.find_instance("hash1:1").instance_id == "inst1"
+    assert store.find_instance(f"hash1:{PIPELINE_VERSION}").instance_id == "inst1"
 
     rec2 = _record("hash1")
     rec2.instance_id = "inst2"

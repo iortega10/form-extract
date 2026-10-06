@@ -7,7 +7,10 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 
-PIPELINE_VERSION = "1"
+# 0.3.1 moved this to "2": the marker classifier no longer counts a field's
+# own label as an option candidate, so the same file produces different field
+# values than 0.3.0 and cached 0.3.0 records must not be served.
+PIPELINE_VERSION = "2"
 
 
 class RegionType(str, Enum):

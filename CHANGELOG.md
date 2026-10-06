@@ -18,6 +18,19 @@ single schema version bump per output-changing release.
   formextract.evals.structure_probe` prints a deterministic, integers-only
   census of a workbook for safe inspection of a real document.
 
+## 0.3.1 (unreleased)
+
+### Fixed
+
+- A field's own label is no longer counted as an option next to a marker, so
+  `Label | X | Option` rows are right-only and auto-select instead of being
+  ambiguous.
+
+### Changed
+
+- `PIPELINE_VERSION` is now `2`, so records produced by 0.3.0 are not served
+  from the cache.
+
 ## 0.3.0 (2026-10-05)
 
 This release also carries the 0.2.0 reliability work below: 0.2.0 was never tagged or
@@ -63,9 +76,10 @@ published on its own.
 - A cached unparseable LLM original response now goes straight to the repair
   prompt instead of re-spending the original prompt.
 
-Expected visible effect on a real checklist: roughly two thirds of populated
-between-marked checkbox values become null until a convention is declared in
-0.4.0.
+Expected visible effect on a real checklist: roughly 18 of 32 markers on the
+reference sheet are genuinely ambiguous between two options and stay null until
+a convention is declared; the other single-checkbox rows were over-nulled in
+0.3.0 and are fixed in 0.3.1.
 
 ## 0.2.0 (not released separately; included in 0.3.0)
 

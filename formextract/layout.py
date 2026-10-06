@@ -292,6 +292,17 @@ def _classify_markers(
     (label) column. Word-level PDF text is grouped by band so a multi-word
     option phrase is one candidate. The marker's own band also contributes the
     mark's merged text plus adjacent non-mark elements.
+
+    A field's own label is never an option candidate. The anchor extraction
+    identifies the label as the anchor column's first element at the marker's
+    row group (`AnchorLocation.ordinal_in_band == 0`). That element is excluded
+    from the marker's own band as well as from the cross-band candidates (the
+    cross-band loop already skips the whole anchor column). This matters when a
+    spreadsheet's label, mark and option cells merge into one layout column
+    band: without the exclusion, `Label | X | Option` reads as BETWEEN instead
+    of RIGHT_ONLY. The exclusion is conservative — if `anchor_column` is None or
+    the row has no anchor band, nothing is excluded and the classification stays
+    exactly as before.
     """
     element_by_id: dict[str, Element] = {}
     band_of_element: dict[str, _Band] = {}
@@ -312,6 +323,13 @@ def _classify_markers(
         if marker_band is None or band_types[marker_band.column][marker_band.index] is not RegionType.FIELD_ROW:
             continue
 
+        label_element_ids: set[str] = set()
+        if anchor_column is not None:
+            for band in bands.get(anchor_column, []):
+                if band.elements and abs(band.bbox.center_y - marker.bbox.center_y) <= tol_y:
+                    label_element_ids.add(band.elements[0].element_id)
+                    break
+
         left_ids: list[str] = []
         right_ids: list[str] = []
 
@@ -331,7 +349,11 @@ def _classify_markers(
         current_side: str | None = None
         current_run: list[Element] = []
         for other in sorted(marker_band.elements, key=lambda e: e.bbox.x0):
-            if other.element_id == g.element_id or other.element_id in non_answer_ids:
+            if (
+                other.element_id == g.element_id
+                or other.element_id in non_answer_ids
+                or other.element_id in label_element_ids
+            ):
                 continue
             if any(t in _MARKS for t in other.text.split()):
                 continue

@@ -163,6 +163,9 @@ model. A control has three honest states:
   candidates. Between-markers stay null unless the caller declares a
   convention.
 
+A field's own label is never an option candidate: a `Label | X | Option` row is
+a right-only marker and auto-selects, not a between-marker.
+
 Declare which way a between-marker points for a form family with
 `PipelineConfig.checkbox_conventions`:
 
