@@ -314,7 +314,10 @@ class PipelineConfig:
 
     ``model`` (default ``"gpt-4o-mini"``) and ``params`` (default
     ``{"temperature": 0}``) identify the LLM; a fast non-reasoning model with
-    thinking off is what keeps one call per tab cheap. ``purpose`` (default
+    thinking off is what keeps one call per tab cheap. The default ``params``
+    stays ``{"temperature": 0}``: a reasoning-model integrator must pass their
+    own ``params`` (those models reject ``temperature``, e.g. HTTP 400) and the
+    change moves the cache key. ``purpose`` (default
     ``"cold_binding"``) namespaces the call-cache key. ``include_hidden_sheets``
     (default ``False``) keeps hidden sheets out of the projection, so they cost
     no call at all. ``non_answer_columns`` (default empty) projects those
@@ -365,7 +368,7 @@ class Pipeline:
             self.config.checkbox_conventions
         )
 
-    def _author_with_reuse(self, chunks, layout, elements):
+    def _author_with_reuse(self, chunks, layout, elements, *, force: bool = False):
         """Author each tab once and replay geometrically identical tabs.
 
         Per workbook and in memory only: the exemplar map lives for the duration
@@ -407,6 +410,7 @@ class Pipeline:
                 regions=layout.regions,
                 purpose=self.config.purpose,
                 include_address=self.config.include_address,
+                force=force,
             )
 
         def author_many(indices):
@@ -585,7 +589,9 @@ class Pipeline:
                 try:
                     if self.config.reuse_layout_bindings:
                         drafts, calls, resolve_errors, replayed_draft_ids = (
-                            self._author_with_reuse(chunks, layout, elements)
+                            self._author_with_reuse(
+                                chunks, layout, elements, force=force
+                            )
                         )
                         fields = drafts_to_fields(
                             drafts,
@@ -608,6 +614,7 @@ class Pipeline:
                             purpose=self.config.purpose,
                             max_workers=self.config.chunk_workers,
                             include_address=self.config.include_address,
+                            force=force,
                         )
                         fields = drafts_to_fields(
                             drafts,

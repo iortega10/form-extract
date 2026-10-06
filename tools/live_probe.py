@@ -488,13 +488,16 @@ def run_once(
         if call["reasoning_tokens"] is not None:
             reasoning_tokens += call["reasoning_tokens"]
             saw_reasoning_tokens = True
+        # A length-truncated response is a parsed-but-flagged result now (the
+        # solver salvages its complete fields), so detect the cut independently
+        # of whether the parse raised.
+        truncated = truncated or _is_truncated(call["content"])
         try:
             chunk_drafts, field_errors = parse_drafts_with_errors(
                 call["content"], include_address=False
             )
         except ValueError:
             parse_errors += 1
-            truncated = truncated or _is_truncated(call["content"])
             continue
         drafts.extend(chunk_drafts)
         parse_errors += len(field_errors)

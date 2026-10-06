@@ -152,27 +152,38 @@ skipped by default. Input runs roughly 0.6k–2.7k tokens per tab on a dense
 sheet (the projection lists one band line per label/option/mark); output is one
 JSON object per field found on that tab, so it grows with the field count.
 
-**Model and client.** Use a fast non-reasoning model, switch reasoning/thinking
-off, set a modest `max_tokens`, keep `temperature` 0 (the default `params`), and
-return the model's raw text. Do not wrap the call in another agent loop and do
-not issue per-tab sub-calls yourself: the pipeline already chunks per tab, and
-`chunk_workers` runs those chunks in parallel. A slow client call is the first
-thing to check when a run feels slow — every archived call carries `latency_ms`.
+**Model and client.** Return the model's raw text. Do not wrap the call in
+another agent loop and do not issue per-tab sub-calls yourself: the pipeline
+already chunks per tab, and `chunk_workers` runs those chunks in parallel. A
+slow client call is the first thing to check when a run feels slow — every
+archived call carries `latency_ms`. Raise on a transport failure (never retry
+internally), and raise `NonRetryable` — or an exception carrying a 4xx
+`status_code`/`code` — for a request that can never succeed: a 4xx costs exactly
+one call. Do not swallow the provider's error text: it ends up in the record's
+`errors` as `transport failed: {exc}`.
 
 **Levers, most effective first.**
 
-1. `include_address=False` — the default; the per-field `address` object grows
-   every prompt and every response.
-2. `chunk_workers=N` — authors N tabs concurrently; the client must be
-   thread-safe.
-3. `reuse_layout_bindings=True` — skips authoring for a tab whose quantised
-   geometry **and** normalised anchor labels both match an earlier tab. It can
-   legitimately never fire: real forms rarely repeat exactly.
-4. `non_answer_columns=[...]` — keeps reference/tag columns out of the
-   projection, so prompts stay smaller and those columns are never read as
-   answers.
-5. `include_hidden_sheets` — left at its default `False`; hidden sheets cost
-   nothing because they are never authored.
+| lever | cost note |
+|---|---|
+| thinking / reasoning off | On a reasoning model the reasoning tokens dominate both the wall clock and the bill; switching thinking off is the single biggest lever. |
+| a fast non-reasoning model | The generation rate is roughly fixed per model, so latency tracks `output tokens / rate`; a small non-reasoning model writes the same JSON faster. |
+| an explicit `max_tokens` (`max_completion_tokens` on OpenAI, `maxOutputTokens` on Gemini) | Size it to the expected output: a length-truncated JSON response is a reported condition (a `response truncated after N fields` error and a `partial` status), not a crash. |
+| `chunk_workers=N` | Authors N tabs concurrently, so wall clock drops without changing per-call cost; the client must be thread-safe. |
+| `reuse_layout_bindings=True` | workbook-dependent: it only fires when two tabs have the same geometry **and** the same anchor labels, so run `tools/profile_workbook.py` first. |
+| `non_answer_columns=[...]` | Keeps reference/tag columns out of the projection, so prompts stay smaller and those columns are never read as answers. |
+| `include_address=False` | The default; the per-field `address` object grew every prompt and every response. |
+| `include_hidden_sheets` | Left at its default `False`; hidden sheets cost nothing because they are never authored. |
+
+The package's default `params` stays `{"temperature": 0}`. A reasoning-model
+integrator must pass their own `params` — those models reject `temperature`
+(HTTP 400):
+
+| provider family | params |
+|---|---|
+| non-reasoning (default) | `{"temperature": 0}` |
+| Gemini 2.5 family | `{"temperature": 0, "thinkingBudget": 0}` (`thinkingBudget` maps to `generationConfig.thinkingConfig`) |
+| OpenAI reasoning models | omit `temperature`; set a low reasoning effort |
 
 **Where to look when it is slow.** Each stored call under
 `<store>/llm/calls/*.json` carries `tokens` and `latency_ms`. `Pipeline.run`
@@ -282,7 +293,10 @@ for block in record.coverage:
 
 **Pitfalls.**
 
-- `force=True` re-spends every call; it does not reuse the call cache.
+- `force=True` re-sends every chunk: it skips both the instance cache and the
+  per-prompt call cache, so an unchanged prompt still makes one model call per
+  chunk (the call budget still applies). `force=False` (the default) serves an
+  unchanged prompt from the call cache and spends nothing.
 - A changed model, `params`, prompt, `PROMPT_VERSION`/`PIPELINE_VERSION`, or
   `include_address` is a different cache key, so changing any of them re-spends
   the run.

@@ -75,6 +75,65 @@ class LLMResponse:
     latency_ms: int | None = None
 
 
+class NonRetryable(Exception):
+    """A request that can never succeed, so the attempt loop must not retry it.
+
+    Raise this from ``LLMClient.complete`` (or wrap the provider's error in it)
+    for a non-retryable response such as a 4xx. Raising an exception that merely
+    *carries* a 4xx status (``status_code`` or ``code`` as an int, a digit
+    string or an ``IntEnum``; also ``response.status_code`` for a
+    requests/httpx-style error) has the same effect. Either way the call costs
+    exactly one attempt, and the provider's own reason still reaches the record
+    unchanged as ``transport failed: {exc}``. ``408`` and ``429`` retry as
+    usual.
+    """
+
+
+def _guarded_attr(obj: Any, name: str) -> Any:
+    """``getattr`` that is total: a hostile ``__getattr__`` never escapes."""
+    try:
+        return getattr(obj, name)
+    except Exception:  # noqa: BLE001 - a broken attribute is simply absent
+        return None
+
+
+def _status_code_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit() and len(text) <= 3:
+            return int(text)
+        return None
+    inner = _guarded_attr(value, "value")
+    if isinstance(inner, int) and not isinstance(inner, bool):
+        return int(inner)
+    return None
+
+
+def _http_status_code(exc: BaseException) -> int | None:
+    """Best-effort HTTP status of a transport error; never raises."""
+    for attr in ("status_code", "code"):
+        code = _status_code_value(_guarded_attr(exc, attr))
+        if code is not None:
+            return code
+    response = _guarded_attr(exc, "response")
+    if response is not None:
+        code = _status_code_value(_guarded_attr(response, "status_code"))
+        if code is not None:
+            return code
+    return None
+
+
+def _is_non_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, NonRetryable):
+        return True
+    code = _http_status_code(exc)
+    return code is not None and 400 <= code < 500 and code not in (408, 429)
+
+
 class LLMClient(Protocol):
     """The single call the pipeline makes per projection chunk.
 
@@ -88,6 +147,12 @@ class LLMClient(Protocol):
     with reasoning/thinking switched off, ``temperature`` 0 and a modest
     ``max_tokens``. When ``PipelineConfig.chunk_workers > 1`` the client is
     called from several threads and must be thread-safe.
+
+    Raise on a transport failure, and raise ``NonRetryable`` (or an exception
+    carrying a 4xx ``status_code``/``code``) for a request that can never
+    succeed: the attempt loop then makes exactly one call for it. Do not retry
+    internally, and do not wrap the provider's message away - it ends up in the
+    record's ``errors`` as ``transport failed: {exc}``.
     """
 
     def complete(self, prompt: str, *, model: str, params: dict[str, Any]) -> LLMResponse: ...
@@ -216,6 +281,94 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+TRUNCATION_ERROR_PREFIX = "response truncated after "
+
+
+def _scan_unterminated_fields(text: str) -> tuple[list[str], bool]:
+    """One linear, string/escape-aware pass over a raw model response.
+
+    Returns ``(complete_objects, unterminated)``. ``complete_objects`` are the
+    raw substrings of the top-level objects in the ``fields`` array that closed
+    before the end of input; ``unterminated`` is True when the response ends
+    with a brace/bracket still open or inside a string. Iterative, no
+    recursion, O(len(text)) even on adversarial input, and never raises.
+    """
+    start = text.find("{")
+    if start == -1:
+        return [], False
+    key = text.find('"fields"', start)
+    array_at = text.find("[", key) if key != -1 else -1
+
+    depth = 0
+    in_string = False
+    escape = False
+    array_depth: int | None = None
+    obj_start: int | None = None
+    objects: list[str] = []
+
+    i = start
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{" or ch == "[":
+            if i == array_at:
+                array_depth = depth + 1
+            depth += 1
+            if ch == "{" and array_depth is not None and depth == array_depth + 1:
+                obj_start = i
+        elif ch == "}" or ch == "]":
+            if (
+                ch == "}"
+                and obj_start is not None
+                and array_depth is not None
+                and depth == array_depth + 1
+            ):
+                objects.append(text[obj_start : i + 1])
+                obj_start = None
+            depth -= 1
+            if array_depth is not None and depth < array_depth:
+                array_depth = None
+                obj_start = None
+        i += 1
+
+    return objects, (depth > 0 or in_string)
+
+
+def _salvage_truncated_response(
+    text: str, *, include_address: bool
+) -> tuple[list[BindingDraft], list[str]] | None:
+    """Parse every complete field object a length-truncated response finished.
+
+    Returns ``(drafts, errors)`` when the response is unterminated, else
+    ``None`` so the caller can re-raise: a balanced-but-invalid response still
+    goes to the repair call, unchanged. The one added error names the cut, so
+    the record reads PARTIAL; the caller archives the response unindexed.
+    """
+    raw_objects, unterminated = _scan_unterminated_fields(text)
+    if not unterminated:
+        return None
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    drafts: list[BindingDraft] = []
+    errors: list[str] = []
+    for idx, raw in enumerate(raw_objects):
+        try:
+            item = json.loads(raw)
+            drafts.append(_parse_one_draft(item, now, include_address=include_address))
+        except Exception as exc:  # noqa: BLE001 - a salvaged field may still be bad
+            errors.append(f"field {idx}: {exc}")
+    errors.append(f"{TRUNCATION_ERROR_PREFIX}{len(raw_objects)} fields")
+    return drafts, errors
+
+
 def parse_drafts(text: str, *, include_address: bool = True) -> list[BindingDraft]:
     drafts, _ = parse_drafts_with_errors(text, include_address=include_address)
     return drafts
@@ -224,7 +377,13 @@ def parse_drafts(text: str, *, include_address: bool = True) -> list[BindingDraf
 def parse_drafts_with_errors(
     text: str, *, include_address: bool = True
 ) -> tuple[list[BindingDraft], list[str]]:
-    data = _extract_json(text)
+    try:
+        data = _extract_json(text)
+    except ValueError:
+        salvaged = _salvage_truncated_response(text, include_address=include_address)
+        if salvaged is None:
+            raise
+        return salvaged
     if not isinstance(data, dict):
         raise ValueError("LLM response is not a JSON object")
     drafts: list[BindingDraft] = []
@@ -313,6 +472,11 @@ def _complete_with_retries(
             return llm_client.complete(prompt, model=model, params=params)
         except Exception as exc:  # noqa: BLE001 - network/5xx/timeout transport errors
             last_exc = exc
+            if _is_non_retryable(exc):
+                # A 4xx (other than 408/429) or an explicit NonRetryable can
+                # never succeed: one call, no backoff. The reason is not wrapped
+                # away - the caller reports `transport failed: {exc}`.
+                break
             if attempt + 1 < attempts and backoff_seconds:
                 time.sleep(backoff_seconds * (2**attempt))
     assert last_exc is not None
@@ -347,6 +511,7 @@ def author_drafts(
     call_budget: int | None = None,
     max_workers: int = 1,
     include_address: bool = False,
+    force: bool = False,
 ) -> tuple[list[BindingDraft], list[LLMCall], list[ResolutionError]]:
     region_bbox = {r.region_id: r.bbox for r in (regions or [])}
     budget = _Budget(
@@ -362,11 +527,14 @@ def author_drafts(
         the caller must archive (with an index decision made by the caller after
         parsing). A cached response is returned with its archived ``LLMCall``.
         A cached response that no longer parses is treated as a cache miss and
-        falls through to a fresh call.
+        falls through to a fresh call. With ``force`` the call-cache lookup is
+        skipped entirely, so the model is called even for an unchanged prompt.
         """
-        cached = store.find_llm_call(
-            purpose=purpose, model=model, params=params, prompt=prompt
-        )
+        cached = None
+        if not force:
+            cached = store.find_llm_call(
+                purpose=purpose, model=model, params=params, prompt=prompt
+            )
         if cached is not None:
             candidate = _read_call_response(store, cached)
             try:
@@ -478,7 +646,11 @@ def author_drafts(
         else:
             if fresh:
                 # A response with per-field errors still parses, but indexing it
-                # would serve the same partial answer on every rerun.
+                # would serve the same partial answer on every rerun. A salvaged
+                # length-truncated response lands here too (its field list
+                # carries the `response truncated after N fields` error), which
+                # is what skips the repair call: the cut is a reported condition
+                # the repair provably reproduces.
                 chunk_calls.append(archive(response, prompt, index=not field_errors))
 
         call_ref = chunk_calls[-1].call_id if chunk_calls else None

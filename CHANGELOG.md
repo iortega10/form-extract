@@ -42,6 +42,21 @@ single schema version bump per output-changing release.
   the instance cache, but each chunk whose response parsed without field errors
   is served from the call cache. `min_coverage` is part of
   `compute_cache_key`.
+- **Truncation salvage (parser-only).** A length-truncated response — one that
+  ends with a brace/bracket still open or inside a string — no longer raises out
+  of `parse_drafts_with_errors` and no longer triggers the repair call (which
+  re-sent the same prompt and truncated the same way, doubling the spend). A
+  single linear, string/escape-aware scan keeps every complete field object
+  before the cut and appends one error, `response truncated after N fields`
+  (N = the complete fields kept, `0` included). The salvaged fields go through
+  the usual per-field parse (a bad field is still a field error), the record
+  reads `partial`, and the response is archived unindexed so a rerun re-sends
+  it. A balanced-but-invalid response (a syntax error with balanced delimiters,
+  trailing prose, a bad escape) still goes to the repair call, unchanged.
+- **Cost levers table in the README.** The integrator guide now ranks the
+  cost/latency levers (thinking off, a fast non-reasoning model, an explicit
+  `max_tokens`, `chunk_workers`, `reuse_layout_bindings`) with a cost note per
+  row, plus a per-provider-family `params` table.
 
 ### Changed
 
@@ -58,6 +73,26 @@ single schema version bump per output-changing release.
   simply carries `coverage=[]` until the cache is cleared or `force=True` is
   used. That is the cost of not invalidating: the field is additive, so
   `SCHEMA_VERSION` does not move.
+
+### Fixed
+
+- **A 4xx is no longer retried.** `resolve._complete_with_retries` made three
+  attempts with backoff for *any* exception. A new `resolve.NonRetryable`
+  marker (raise it, or wrap the provider's error in it) plus a total attribute
+  sniff (`status_code`/`code`/`response.status_code`, accepted as an int, a
+  digit string or an `IntEnum`) makes a 4xx cost exactly one call, while 408,
+  429, 5xx, timeouts and unknown exceptions retry as before. The provider's own
+  reason still reaches the record unchanged as `transport failed: {exc}`.
+- **`force=True` now re-spends, as documented.** `Pipeline.run(force=True)`
+  previously bypassed only the instance cache; each chunk was still served from
+  the per-prompt call cache, so an unchanged prompt made zero model calls. It
+  now also skips the call-cache lookup (`author_drafts(..., force=True)` threaded
+  through the serial, `chunk_workers` and reuse paths), calls the model once per
+  chunk, and indexes the fresh response exactly as a non-forced run would. The
+  call budget still applies, and `force=False` is byte-identical to before.
+
+No cache key, `PROMPT_VERSION`, `PIPELINE_VERSION`, `SCHEMA_VERSION` or default
+`params` changed in these entries.
 
 ## 0.5.0 (2026-10-06)
 
