@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import time
 import uuid
@@ -46,6 +47,27 @@ def _read_json(path: Path, default):
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+
+
+def _atomic_write_text(path: Path, text: str, *, idempotent: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if idempotent and path.exists():
+        return
+    tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        if path.exists():
+            # Another thread already wrote a complete destination (identical
+            # content-addressed chunks can target the same key); keep the
+            # winner rather than raising on Windows' transient lock.
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return
+        raise
 
 
 class Store:
@@ -192,13 +214,14 @@ class Store:
         response: str,
         tokens: int | None = None,
         latency_ms: int | None = None,
+        index: bool = True,
     ) -> LLMCall:
         prompt_hash = _sha256_text(prompt)
         response_hash = _sha256_text(response)
         prompt_path = self.llm_dir / "prompts" / f"{prompt_hash}.txt"
         response_path = self.llm_dir / "responses" / f"{response_hash}.txt"
-        prompt_path.write_text(prompt, encoding="utf-8")
-        response_path.write_text(response, encoding="utf-8")
+        _atomic_write_text(prompt_path, prompt, idempotent=True)
+        _atomic_write_text(response_path, response, idempotent=True)
         call = LLMCall(
             call_id=uuid.uuid4().hex,
             purpose=purpose,
@@ -210,12 +233,13 @@ class Store:
             tokens=tokens,
             latency_ms=latency_ms,
         )
-        key = self._llm_call_key(
-            purpose=purpose,
-            model=model,
-            params=params,
-            prompt_hash=prompt_hash,
-        )
-        call_path = self.llm_dir / "calls" / f"{key}.json"
-        call_path.write_text(to_json(call), encoding="utf-8")
+        if index:
+            key = self._llm_call_key(
+                purpose=purpose,
+                model=model,
+                params=params,
+                prompt_hash=prompt_hash,
+            )
+            call_path = self.llm_dir / "calls" / f"{key}.json"
+            _atomic_write_text(call_path, to_json(call))
         return call

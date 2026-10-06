@@ -6,13 +6,14 @@ import hashlib
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from openpyxl.utils import column_index_from_string
 
-from .ingest import ingest
+from .ingest import IngestResult, ingest
 from .layout import analyze, page_anchor_multiset, page_geometry_signature
 from .model import (
     CHECKBOX_MARK_FOLLOWS_OPTION,
@@ -96,6 +97,14 @@ def validate_non_answer_columns(selectors) -> None:
             f"invalid non_answer_columns selector {sel!r}: "
             "expected a column string or {'tab': glob, 'column': letters}"
         )
+
+
+def validate_chunk_workers(value: int) -> None:
+    """Raise ValueError unless `chunk_workers` is an int in 1..32 (bool excluded)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("chunk_workers must be an integer between 1 and 32")
+    if not 1 <= value <= 32:
+        raise ValueError("chunk_workers must be between 1 and 32")
 
 
 def _normalize_checkbox_conventions(selectors) -> list[CheckboxConvention]:
@@ -229,6 +238,7 @@ def compute_cache_key(
     non_answer_columns: tuple[Any, ...] = (),
     checkbox_conventions: tuple[Any, ...] = (),
     reuse_layout_bindings: bool = False,
+    include_address: bool = False,
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
@@ -251,13 +261,59 @@ def compute_cache_key(
             non_answer_hash,
             conventions_hash,
             "1" if reuse_layout_bindings else "0",
+            "1" if include_address else "0",
         ]
     )
     return hashlib.sha256(parts.encode("utf-8")).hexdigest()
 
 
+def page_tabs_for(ing: IngestResult) -> dict[int, str]:
+    """Map every page to its own sheet name, falling back to ``page N``.
+
+    Shared by ``Pipeline.run`` and ``tools/profile_workbook.py`` so both name
+    projection chunks the same way.
+    """
+    page_tabs: dict[int, str] = {}
+    if ing.sheet_names:
+        for page in range(ing.page_count or 0):
+            page_tabs[page] = (
+                ing.sheet_names[page]
+                if page < len(ing.sheet_names)
+                else f"page {page}"
+            )
+            for e in ing.elements:
+                if e.bbox.page == page and e.sheet is not None:
+                    page_tabs[page] = e.sheet
+                    break
+    else:
+        for page in range(ing.page_count or 0):
+            page_tabs[page] = f"page {page}"
+    return page_tabs
+
+
 @dataclass
 class PipelineConfig:
+    """Every knob that changes a run's calls, and therefore its cost.
+
+    ``model`` (default ``"gpt-4o-mini"``) and ``params`` (default
+    ``{"temperature": 0}``) identify the LLM; a fast non-reasoning model with
+    thinking off is what keeps one call per tab cheap. ``purpose`` (default
+    ``"cold_binding"``) namespaces the call-cache key. ``include_hidden_sheets``
+    (default ``False``) keeps hidden sheets out of the projection, so they cost
+    no call at all. ``non_answer_columns`` (default empty) projects those
+    columns as annotations only, shrinking each prompt and stopping reference
+    text being read as an answer. ``checkbox_conventions`` (default empty)
+    resolves between-markers deterministically and changes no call.
+    ``reuse_layout_bindings`` (default ``False``) skips authoring for tabs whose
+    quantised geometry and anchor labels both match an earlier tab, trading
+    fewer calls for an exact-match requirement that can legitimately never
+    fire. ``include_address`` (default ``False``) drops the per-field
+    ``address`` object from the contract - the largest single prompt/output
+    saving; ``True`` restores the pre-0.5.0 prompt. ``chunk_workers`` (default
+    ``1``, allowed 1..32) authors that many tabs at once, which cuts wall-clock
+    time without changing per-call cost, and requires a thread-safe client.
+    """
+
     model: str = "gpt-4o-mini"
     params: dict[str, Any] = field(default_factory=lambda: {"temperature": 0})
     purpose: str = "cold_binding"
@@ -265,6 +321,8 @@ class PipelineConfig:
     non_answer_columns: list[Any] = field(default_factory=list)
     checkbox_conventions: list[Any] = field(default_factory=list)
     reuse_layout_bindings: bool = False
+    include_address: bool = False
+    chunk_workers: int = 1
 
 
 class Pipeline:
@@ -278,11 +336,12 @@ class Pipeline:
         self.llm_client = llm_client
         self.config = config or PipelineConfig()
         validate_non_answer_columns(self.config.non_answer_columns)
+        validate_chunk_workers(self.config.chunk_workers)
         self._checkbox_conventions = _normalize_checkbox_conventions(
             self.config.checkbox_conventions
         )
 
-    def _author_with_reuse(self, chunks, layout, elements, tabs, non_answer_ids):
+    def _author_with_reuse(self, chunks, layout, elements):
         """Author each tab once and replay geometrically identical tabs.
 
         Per workbook and in memory only: the exemplar map lives for the duration
@@ -294,21 +353,76 @@ class Pipeline:
         """
         elements_by_id = {e.element_id: e for e in elements}
         region_bbox = {r.region_id: r.bbox for r in layout.regions}
-        reuse: dict[tuple[str, tuple[str, ...]], tuple[int, list]] = {}
-        drafts = []
-        calls: list[LLMCall] = []
-        errors: list[ResolutionError] = []
-        replayed_draft_ids: set[str] = set()
 
+        # Phase A: key every chunk and pick the first chunk of each distinct
+        # (geometry signature, anchor multiset) key as its exemplar.
+        chunk_pages: list[int] = []
+        chunk_keys: list[tuple[str, tuple[str, ...]]] = []
+        exemplar_index_by_key: dict[tuple[str, tuple[str, ...]], int] = {}
+        exemplar_indices: list[int] = []
         for idx, chunk in enumerate(chunks):
-            page = tabs.index(chunk.key) if chunk.key in tabs else idx
+            page = chunk.page if chunk.page is not None else idx
             key = (
                 page_geometry_signature(layout, elements_by_id, page),
                 page_anchor_multiset(layout, page),
             )
-            exemplar = reuse.get(key)
+            chunk_pages.append(page)
+            chunk_keys.append(key)
+            if key not in exemplar_index_by_key:
+                exemplar_index_by_key[key] = idx
+                exemplar_indices.append(idx)
+
+        def author_one(pair):
+            idx, chunk = pair
+            return author_drafts(
+                [chunk],
+                self.llm_client,
+                model=self.config.model,
+                params=self.config.params,
+                store=self.store,
+                regions=layout.regions,
+                purpose=self.config.purpose,
+                include_address=self.config.include_address,
+            )
+
+        def author_many(indices):
+            pairs = [(idx, chunks[idx]) for idx in indices]
+            if self.config.chunk_workers <= 1:
+                return [author_one(pair) for pair in pairs]
+            with ThreadPoolExecutor(max_workers=self.config.chunk_workers) as executor:
+                return list(executor.map(author_one, pairs))
+
+        # Phase B: author the exemplars (concurrently when configured).
+        exemplar_results = author_many(exemplar_indices)
+        exemplar_drafts_by_key: dict[tuple[str, tuple[str, ...]], tuple[int, list]] = {}
+        for exemplar_idx, (fresh_drafts, _fresh_calls, _fresh_errors) in zip(
+            exemplar_indices, exemplar_results
+        ):
+            if fresh_drafts:
+                exemplar_drafts_by_key[chunk_keys[exemplar_idx]] = (
+                    chunk_pages[exemplar_idx],
+                    fresh_drafts,
+                )
+
+        # Phase C: walk chunks in order, replaying non-exemplars and collecting
+        # the fall-through chunks that still need a fresh authoring call. Results
+        # are assembled below in chunk order, so a fallback before a later
+        # exemplar still lands in the same position as the serial path.
+        results_by_index: dict[int, tuple[list, list[LLMCall], list[ResolutionError]]] = {}
+        for pos, exemplar_idx in enumerate(exemplar_indices):
+            results_by_index[exemplar_idx] = exemplar_results[pos]
+
+        replayed_draft_ids: set[str] = set()
+        fallback_indices: list[int] = []
+
+        for idx, chunk in enumerate(chunks):
+            if idx in results_by_index:
+                continue
+            key = chunk_keys[idx]
+            exemplar = exemplar_drafts_by_key.get(key)
             if exemplar is not None:
                 exemplar_page, exemplar_drafts = exemplar
+                page = chunk_pages[idx]
                 remapped = remap_drafts_for_page(
                     exemplar_drafts,
                     exemplar_page,
@@ -323,27 +437,26 @@ class Pipeline:
                         layout,
                         self.config,
                     )
-                    drafts.extend(remapped)
                     replayed_draft_ids.update(d.draft_id for d in remapped)
+                    results_by_index[idx] = (remapped, [], [])
                     continue
                 # Reuse miss: fall through to a fresh call for this tab.
+            fallback_indices.append(idx)
 
-            fresh_drafts, fresh_calls, fresh_errors = author_drafts(
-                [chunk],
-                self.llm_client,
-                model=self.config.model,
-                params=self.config.params,
-                store=self.store,
-                regions=layout.regions,
-                purpose=self.config.purpose,
-            )
+        if fallback_indices:
+            fallback_results = author_many(fallback_indices)
+            for idx, result in zip(fallback_indices, fallback_results):
+                results_by_index[idx] = result
+
+        drafts: list = []
+        calls: list[LLMCall] = []
+        errors: list[ResolutionError] = []
+        for idx in range(len(chunks)):
+            fresh_drafts, fresh_calls, fresh_errors = results_by_index[idx]
             drafts.extend(fresh_drafts)
             calls.extend(fresh_calls)
             for err in fresh_errors:
                 errors.append(ResolutionError(str(idx), err.tab, err.reason))
-            if fresh_drafts:
-                reuse[key] = (page, fresh_drafts)
-
         return drafts, calls, errors, replayed_draft_ids
 
     def run(
@@ -362,6 +475,7 @@ class Pipeline:
             non_answer_columns=tuple(self.config.non_answer_columns),
             checkbox_conventions=tuple(self._checkbox_conventions),
             reuse_layout_bindings=self.config.reuse_layout_bindings,
+            include_address=self.config.include_address,
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -428,20 +542,23 @@ class Pipeline:
                 if not self.config.include_hidden_sheets
                 else []
             )
+            page_tabs = page_tabs_for(ing)
             non_answer_ids = _resolve_non_answer_element_ids(
                 elements, self.config.non_answer_columns
             )
             layout = analyze(elements, non_answer_element_ids=non_answer_ids)
             if self.llm_client is not None:
                 chunks = project_chunks(
-                    layout, elements, tabs, non_answer_element_ids=non_answer_ids
+                    layout,
+                    elements,
+                    tabs,
+                    non_answer_element_ids=non_answer_ids,
+                    page_tabs=page_tabs,
                 )
                 try:
                     if self.config.reuse_layout_bindings:
                         drafts, calls, resolve_errors, replayed_draft_ids = (
-                            self._author_with_reuse(
-                                chunks, layout, elements, tabs, non_answer_ids
-                            )
+                            self._author_with_reuse(chunks, layout, elements)
                         )
                         fields = drafts_to_fields(
                             drafts,
@@ -451,6 +568,7 @@ class Pipeline:
                             non_answer_element_ids=non_answer_ids,
                             checkbox_conventions=self._checkbox_conventions,
                             replayed_draft_ids=replayed_draft_ids,
+                            page_tabs=page_tabs,
                         )
                     else:
                         drafts, calls, resolve_errors = author_drafts(
@@ -461,6 +579,8 @@ class Pipeline:
                             store=self.store,
                             regions=layout.regions,
                             purpose=self.config.purpose,
+                            max_workers=self.config.chunk_workers,
+                            include_address=self.config.include_address,
                         )
                         fields = drafts_to_fields(
                             drafts,
@@ -469,6 +589,7 @@ class Pipeline:
                             tabs=tabs,
                             non_answer_element_ids=non_answer_ids,
                             checkbox_conventions=self._checkbox_conventions,
+                            page_tabs=page_tabs,
                         )
                 except Exception as exc:  # noqa: BLE001
                     status = InstanceStatus.PARTIAL

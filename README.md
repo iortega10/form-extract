@@ -138,6 +138,126 @@ Notes:
   `section_path` and `source_elements`. Hidden workbook sheets are captured in
   `SourceInfo.sheet_state`, excluded from default output, and included only
   with `PipelineConfig(include_hidden_sheets=True)`.
+
+### Integrating from an agent or service
+
+For callers wrapping the pipeline in an agent, service, or job runner. The
+prompt-size and concurrency knobs it refers to are in
+[Prompt size and concurrency](#prompt-size-and-concurrency).
+
+**Cost model.** One model call per authored tab, plus at most one repair call
+for a tab whose response was not valid JSON (or whose fields all failed to
+parse). Only tabs with layout content are authored, so hidden sheets are
+skipped by default. Input runs roughly 0.6k–2.7k tokens per tab on a dense
+sheet (the projection lists one band line per label/option/mark); output is one
+JSON object per field found on that tab, so it grows with the field count.
+
+**Model and client.** Use a fast non-reasoning model, switch reasoning/thinking
+off, set a modest `max_tokens`, keep `temperature` 0 (the default `params`), and
+return the model's raw text. Do not wrap the call in another agent loop and do
+not issue per-tab sub-calls yourself: the pipeline already chunks per tab, and
+`chunk_workers` runs those chunks in parallel. A slow client call is the first
+thing to check when a run feels slow — every archived call carries `latency_ms`.
+
+**Levers, most effective first.**
+
+1. `include_address=False` — the default; the per-field `address` object grows
+   every prompt and every response.
+2. `chunk_workers=N` — authors N tabs concurrently; the client must be
+   thread-safe.
+3. `reuse_layout_bindings=True` — skips authoring for a tab whose quantised
+   geometry **and** normalised anchor labels both match an earlier tab. It can
+   legitimately never fire: real forms rarely repeat exactly.
+4. `non_answer_columns=[...]` — keeps reference/tag columns out of the
+   projection, so prompts stay smaller and those columns are never read as
+   answers.
+5. `include_hidden_sheets` — left at its default `False`; hidden sheets cost
+   nothing because they are never authored.
+
+**Where to look when it is slow.** Each stored call under
+`<store>/llm/calls/*.json` carries `tokens` and `latency_ms`. `Pipeline.run`
+returns the record, so this shows where the time went:
+
+```python
+from formextract.store import Store
+
+store = Store(".formextract-store")
+record = store.load_instance("INSTANCE_ID")
+for call in record.llm_calls:
+    print(call.call_id, call.latency_ms, call.tokens)
+```
+
+**What the model should return.** The prompt carries the full output contract;
+a response is one JSON object with exactly those keys and no `address` key
+unless `include_address=True`. A tiny tab with one single-select, one
+multi-select, one bool and one text field:
+
+<!-- example:model-output -->
+```json
+{
+  "fields": [
+    {
+      "label": "Ship to Canada?",
+      "control_type": "single_select",
+      "options": [{"text": "Yes", "selected": true}, {"text": "No", "selected": false}],
+      "answer": ["Yes"],
+      "annotations": [],
+      "region_id": "p0:c1:field-row:ship-to-canada",
+      "source_elements": [{"region_id": "p0:c1:field-row:ship-to-canada", "band_id": 1, "segment_index": 0}],
+      "confidence": 0.9
+    },
+    {
+      "label": "Regions covered",
+      "control_type": "multi_select",
+      "options": [{"text": "EMEA", "selected": true}, {"text": "APAC", "selected": false}],
+      "answer": ["EMEA"],
+      "annotations": [],
+      "region_id": "p0:c1:field-row:regions-covered",
+      "source_elements": [{"region_id": "p0:c1:field-row:regions-covered", "band_id": 2, "segment_index": 0}],
+      "confidence": 0.8
+    },
+    {
+      "label": "Priority order",
+      "control_type": "bool",
+      "options": [],
+      "answer": ["true"],
+      "annotations": [],
+      "region_id": "p0:c1:field-row:priority-order",
+      "source_elements": [{"region_id": "p0:c1:field-row:priority-order", "band_id": 3, "segment_index": 0}],
+      "confidence": 0.7
+    },
+    {
+      "label": "Reviewed by",
+      "control_type": "text",
+      "options": [],
+      "answer": ["J. Rivera, 2026-01-05"],
+      "annotations": [],
+      "region_id": "p0:c1:field-row:reviewed-by",
+      "source_elements": [{"region_id": "p0:c1:field-row:reviewed-by", "band_id": 4, "segment_index": 0}],
+      "confidence": 0.6
+    }
+  ]
+}
+```
+
+**Reading a result.** `record.status` is `complete` or `partial`, and
+`record.errors` lists what went wrong per chunk (parse failure, transport
+failure, or a field-level error such as `field 2: ...`). A single field can
+carry `provenance.review_flag` with a `provenance.review_reason` (for example
+`ambiguous_mark` or `replay_mismatch`), a `Field.ambiguity` record, or
+`unresolved_source_refs`. A `partial` run is re-attempted on the next `run()`
+of the same bytes: chunks whose response parsed with no field errors are served
+from the call cache, while chunks with parse or field errors are re-sent.
+
+**Pitfalls.**
+
+- `force=True` re-spends every call; it does not reuse the call cache.
+- A changed model, `params`, prompt, `PROMPT_VERSION`/`PIPELINE_VERSION`, or
+  `include_address` is a different cache key, so changing any of them re-spends
+  the run.
+- One process per `Store` directory: two processes writing the same store are
+  not supported.
+
 ### 3. Test against the synthetic fixture directly
 
 ```python
@@ -220,6 +340,22 @@ exemplar map is per run and in memory only — it is never written to the store.
 
 The six-identical-tabs case drops from 6 model calls to 1 when the flag is on; a
 mixed workbook of two layouts x three tabs drops from 6 calls to 2.
+
+## Prompt size and concurrency
+
+`PipelineConfig(include_address=True)` restores the pre-0.5.0 prompt, which
+asked the model for a per-field `address` object. It defaults to `False`: the
+prompt omits that contract key (and its explanation), so each tab costs a little
+less output generation. If a model returns `address` anyway it is ignored and
+`draft.address` stays `None`.
+
+`PipelineConfig(chunk_workers=N)` (1..32, default 1) resolves projection chunks
+with a thread pool. Results are returned in chunk order and the call budget is
+shared under a lock, so raising it only helps when the `LLMClient` is
+thread-safe. With `1` the path is identical to the serial 0.4.0 path.
+
+`PROMPT_VERSION` and `PIPELINE_VERSION` are `3`; records produced by 0.4.0 are
+not served from the cache.
 
 ## Checking a real workbook safely
 

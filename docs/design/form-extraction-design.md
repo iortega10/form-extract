@@ -16,8 +16,8 @@ transcript of it. Where the discussion changed the starting plan, the
 
 A real sample PDF, inspected with `pdftotext -layout`, has a genuine text
 layer (not scanned) and is a rendered export of a multi-tab Excel workbook
-(it references "Foreign Countries Tab," "Fees tab," "Task Notes Tab,"
-"Installment Billing Tab," "reference tab"). A representative layout
+(it references several other tabs of the workbook by name, such as a
+fees tab, a notes tab and a reference tab). A representative layout
 fragment:
 
 ```

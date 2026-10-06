@@ -264,9 +264,11 @@ def test_rerun_after_partial_reuses_archived_calls(store):
     class Client:
         def __init__(self):
             self.calls = 0
+            self.prompts = []
 
         def complete(self, prompt, *, model, params):
             self.calls += 1
+            self.prompts.append(prompt)
             if "good chunk" in prompt:
                 return LLMResponse(
                     text=json.dumps(
@@ -310,16 +312,22 @@ def test_rerun_after_partial_reuses_archived_calls(store):
         store=store,
         backoff_seconds=0,
     )
-    assert second.calls == 0  # both bad original and bad repair are already archived
+    # The good chunk is served from the call cache; the failed chunk's original
+    # and repair prompts were not indexed, so only those two prompts are re-sent.
+    assert second.calls == 2
     assert len(drafts) == 1
-    assert len(calls) == 3  # good chunk reused + bad chunk's two cached calls
+    assert len(calls) == 3  # good cached + bad original + bad repair
     assert len(errors) == 1
     assert errors[0].chunk_id == "1"
+    assert sum("good chunk" in p for p in second.prompts) == 0
+    assert sum("bad chunk" in p for p in second.prompts) == 2
 
 
-def test_cached_bad_original_goes_straight_to_repair(store):
+def test_cached_bad_original_from_040_is_a_cache_miss(store):
     chunk = ProjectionChunk(key="tab", text="content")
     prompt = build_prompt(chunk)
+    # Simulate a 0.4.0-era entry: archived under the old rule that indexed
+    # every response, including unparseable ones.
     store.archive_llm_call(
         purpose="cold_binding",
         model="m",
@@ -361,11 +369,14 @@ def test_cached_bad_original_goes_straight_to_repair(store):
         backoff_seconds=0,
     )
 
+    # The stale bad entry is ignored as a cache miss: the original prompt is
+    # re-sent (not skipped straight to the repair prompt) and the fresh good
+    # response replaces the stale lookup entry.
     assert len(client.prompts) == 1
-    assert "Parse error" in client.prompts[0]
+    assert "Parse error" not in client.prompts[0]
     assert len(drafts) == 1
     assert errors == []
-    assert len(calls) == 2  # cached bad original + fresh repair
+    assert len(calls) == 1  # fresh original only; stale entry was not served
 
 
 def test_empty_sheet_complete_is_cached(tmp_path):

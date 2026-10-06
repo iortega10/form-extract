@@ -13,7 +13,10 @@ from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 # 0.4.0-C2 leaves this at "2": layout-signature reuse is opt-in
 # (PipelineConfig.reuse_layout_bindings, default False) and the cache key
 # carries the flag, so default-config output is unchanged from 0.3.1.
-PIPELINE_VERSION = "2"
+# 0.5.0 moves this to "3": the default prompt no longer asks for `address`
+# (PipelineConfig.include_address defaults False), so default output changed
+# and cached 0.4.0 records must not be served.
+PIPELINE_VERSION = "3"
 
 
 class RegionType(str, Enum):

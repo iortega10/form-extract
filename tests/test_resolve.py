@@ -35,7 +35,7 @@ def test_projection_contains_regions_and_bands(spec_pdf):
 
 def test_build_prompt_carries_contract_and_rules(spec_pdf):
     _, chunks = _chunks(spec_pdf)
-    prompt = build_prompt(chunks[0])
+    prompt = build_prompt(chunks[0], include_address=True)
     assert BINDING_OUTPUT_CONTRACT in prompt
     assert "annotation" in prompt
     assert "multi_select" in prompt

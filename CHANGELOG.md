@@ -4,6 +4,36 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
+## 0.5.0 (2026-10-06)
+
+### Changed
+
+- **Smaller default prompts.** `PipelineConfig.include_address` now defaults to
+  `False`, so `build_prompt()` omits the `address` key from the output contract
+  and the bullet that explains it. A model that returns `address` anyway has it
+  ignored (`draft.address` stays `None`). `PROMPT_VERSION` and
+  `PIPELINE_VERSION` are now `3`, so cached 0.4.0 records are not served.
+- **Failures are not cached.** A response is indexed in the LLM lookup cache
+  only when it parses **and** every field in it parses
+  (`parse_drafts_with_errors` returns no field errors). A response that parses
+  but carries a per-field error is still archived (prompt/response files and the
+  run's `llm_calls` record), just not indexed, so the same partial answer is not
+  served on a rerun. The rule covers the original response and a repair
+  response. A 0.4.0-era cached unparseable entry is now a cache miss (the
+  original prompt is re-sent) rather than a shortcut to the repair prompt.
+- **Optional concurrent chunk resolution.** `PipelineConfig.chunk_workers`
+  (1..32, default 1) authors chunks with a thread pool; results stay in chunk
+  order and the call budget is enforced under a lock. Only helpful when the
+  `LLMClient` is thread-safe.
+
+### Fixed
+
+- **Tab naming after hidden sheets.** Pages are numbered across all workbook
+  sheets (hidden ones included) but `tabs` held only visible names. Chunk keys
+  and `Field.tab` now use a page-to-tab map built from each page's element
+  `sheet`, so a workbook whose first sheet is hidden no longer shifts every
+  later tab name. This changes output for such workbooks.
+
 ## 0.4.0 (2026-10-06)
 
 This release also carries the 0.3.1 fix below: 0.3.1 was never tagged or published on its

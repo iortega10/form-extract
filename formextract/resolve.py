@@ -6,8 +6,10 @@ import fnmatch
 import hashlib
 import json
 import re
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -51,7 +53,11 @@ BINDING_OUTPUT_CONTRACT = """{"fields": [
    "address": {"anchor_text": str, "column": int, "row_band": int, "offset_right": int},
    "confidence": number}]}"""
 
-PROMPT_VERSION = "2"
+# 0.4.0's prompt asked for a per-field `address` object and explained it in a
+# bullet. 0.5.0 makes that opt-in (include_address=False by default), which
+# shortens every projection prompt, so the prompt hash changes and cached
+# 0.4.0 calls must not be served.
+PROMPT_VERSION = "3"
 GEOMETRIC_SELECTION_TOKEN = "marker_auto_select"
 DECLARED_CONVENTION_TOKEN = "declared_checkbox_convention"
 
@@ -70,6 +76,20 @@ class LLMResponse:
 
 
 class LLMClient(Protocol):
+    """The single call the pipeline makes per projection chunk.
+
+    ``complete`` receives the whole prompt (layout projection plus the JSON
+    output contract) and returns the model's raw text in ``LLMResponse.text``.
+    The pipeline calls it once per authored tab, plus at most one repair call
+    per tab, and never in an outer loop: one dense tab costs roughly 0.6k-2.7k
+    input tokens and one output JSON object per field. Return the text
+    unchanged; ``tokens``/``latency_ms`` are archived with the call and are the
+    first place to look when a run feels slow. Use a fast non-reasoning model
+    with reasoning/thinking switched off, ``temperature`` 0 and a modest
+    ``max_tokens``. When ``PipelineConfig.chunk_workers > 1`` the client is
+    called from several threads and must be thread-safe.
+    """
+
     def complete(self, prompt: str, *, model: str, params: dict[str, Any]) -> LLMResponse: ...
 
 
@@ -77,6 +97,7 @@ class LLMClient(Protocol):
 class ProjectionChunk:
     key: str
     text: str
+    page: int | None = None
 
 
 @dataclass
@@ -92,6 +113,7 @@ def project_chunks(
     tabs: list[str],
     *,
     non_answer_element_ids: set[str] | None = None,
+    page_tabs: dict[int, str] | None = None,
 ) -> list[ProjectionChunk]:
     non_answer_ids = non_answer_element_ids or set()
     by_id = {e.element_id: e for e in elements}
@@ -101,7 +123,10 @@ def project_chunks(
 
     chunks: list[ProjectionChunk] = []
     for page in sorted(by_page):
-        tab = tabs[page] if page < len(tabs) else f"page {page}"
+        if page_tabs is not None:
+            tab = page_tabs.get(page, f"page {page}")
+        else:
+            tab = tabs[page] if page < len(tabs) else f"page {page}"
         lines: list[str] = []
         for region in sorted(by_page[page], key=lambda r: (r.bbox.y0, r.bbox.x0)):
             lines.append(f"### {region.region_id} [{region.type.value}]")
@@ -121,19 +146,38 @@ def project_chunks(
                         segments.append(f"{i}={text}")
                 lines.append(f"- band {band_id}: " + " | ".join(segments))
             lines.append("")
-        chunks.append(ProjectionChunk(key=tab, text="\n".join(lines).strip()))
+        chunks.append(ProjectionChunk(key=tab, text="\n".join(lines).strip(), page=page))
     if not chunks and elements:
         lines = [f"- {e.text}" for e in sorted(elements, key=lambda e: (e.bbox.y0, e.bbox.x0))]
-        chunks.append(ProjectionChunk(key=tabs[0] if tabs else "page 0", text="\n".join(lines)))
+        chunks.append(
+            ProjectionChunk(key=tabs[0] if tabs else "page 0", text="\n".join(lines), page=0)
+        )
     return chunks
 
 
-def build_prompt(chunk: ProjectionChunk) -> str:
+def _binding_contract(include_address: bool) -> str:
+    if include_address:
+        return BINDING_OUTPUT_CONTRACT
+    return BINDING_OUTPUT_CONTRACT.replace(
+        '   "address": {"anchor_text": str, "column": int, "row_band": int, "offset_right": int},\n',
+        "",
+    )
+
+
+def build_prompt(chunk: ProjectionChunk, *, include_address: bool = False) -> str:
+    contract = _binding_contract(include_address)
+    address_bullet = (
+        "- 'address' points at the anchor (left-column label text) and where the value "
+        "lives relative to it: column index, band index within that column, and how many "
+        "text blocks right of the anchor.\n"
+        if include_address
+        else ""
+    )
     return (
         "You extract structured fields from one region group of a non-uniform "
         "form (labels on the left, controls on the right).\n"
         "Return ONLY JSON matching exactly this contract:\n"
-        f"{BINDING_OUTPUT_CONTRACT}\n"
+        f"{contract}\n"
         "Rules:\n"
         "- A field is {label, control_type, options, answer, annotations}, not a label/value pair.\n"
         "- Marks ('X', a checkmark, or a checked box) are DECIDED BY THE RESOLVER, not by "
@@ -150,9 +194,7 @@ def build_prompt(chunk: ProjectionChunk) -> str:
         "non-answer column: treat them as annotations only, never as options, values, "
         "answers or marks.\n"
         "- 'answer' holds the selected option texts (or the free text for text fields).\n"
-        "- 'address' points at the anchor (left-column label text) and where the value "
-        "lives relative to it: column index, band index within that column, and how many "
-        "text blocks right of the anchor.\n"
+        f"{address_bullet}"
         "- 'source_elements' lists the projection segments this field is built from: "
         "for each label/option/mark element, give its region_id, band_id and the "
         "segment index shown as the `i=` prefix on that band line.\n"
@@ -174,12 +216,14 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
-def parse_drafts(text: str) -> list[BindingDraft]:
-    drafts, _ = parse_drafts_with_errors(text)
+def parse_drafts(text: str, *, include_address: bool = True) -> list[BindingDraft]:
+    drafts, _ = parse_drafts_with_errors(text, include_address=include_address)
     return drafts
 
 
-def parse_drafts_with_errors(text: str) -> tuple[list[BindingDraft], list[str]]:
+def parse_drafts_with_errors(
+    text: str, *, include_address: bool = True
+) -> tuple[list[BindingDraft], list[str]]:
     data = _extract_json(text)
     if not isinstance(data, dict):
         raise ValueError("LLM response is not a JSON object")
@@ -191,13 +235,13 @@ def parse_drafts_with_errors(text: str) -> tuple[list[BindingDraft], list[str]]:
         raise ValueError("'fields' is not a list")
     for idx, item in enumerate(raw_fields):
         try:
-            drafts.append(_parse_one_draft(item, now))
+            drafts.append(_parse_one_draft(item, now, include_address=include_address))
         except Exception as exc:  # noqa: BLE001 - one bad field must not drop the chunk
             errors.append(f"field {idx}: {exc}")
     return drafts, errors
 
 
-def _parse_one_draft(item: dict, now: str) -> BindingDraft:
+def _parse_one_draft(item: dict, now: str, *, include_address: bool = True) -> BindingDraft:
     control_type = ControlType(item["control_type"])
     options = [
         Option(
@@ -207,7 +251,7 @@ def _parse_one_draft(item: dict, now: str) -> BindingDraft:
         for o in item.get("options", [])
     ]
     address = None
-    if item.get("address"):
+    if include_address and item.get("address"):
         a = item["address"]
         address = RelationalAddress(
             anchor_id=str(a.get("anchor_text", "")),
@@ -275,6 +319,20 @@ def _complete_with_retries(
     raise last_exc
 
 
+class _Budget:
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.remaining = limit
+        self.lock = threading.Lock()
+
+    def take(self) -> bool:
+        with self.lock:
+            if self.remaining <= 0:
+                return False
+            self.remaining -= 1
+            return True
+
+
 def author_drafts(
     chunks: list[ProjectionChunk],
     llm_client: LLMClient,
@@ -287,36 +345,45 @@ def author_drafts(
     transport_max_attempts: int = TRANSPORT_MAX_ATTEMPTS,
     backoff_seconds: float = TRANSPORT_BACKOFF_SECONDS,
     call_budget: int | None = None,
+    max_workers: int = 1,
+    include_address: bool = False,
 ) -> tuple[list[BindingDraft], list[LLMCall], list[ResolutionError]]:
     region_bbox = {r.region_id: r.bbox for r in (regions or [])}
-    drafts: list[BindingDraft] = []
-    calls: list[LLMCall] = []
-    errors: list[ResolutionError] = []
-    budget = call_budget if call_budget is not None else CALL_BUDGET_PER_CHUNK * len(chunks)
+    budget = _Budget(
+        call_budget if call_budget is not None else CALL_BUDGET_PER_CHUNK * len(chunks)
+    )
 
     def resolve_prompt(
         prompt: str,
-    ) -> tuple[str | None, list[LLMCall], str | None]:
-        """Return (response_text, chunk_calls, transport_error)."""
+    ) -> tuple[LLMResponse | None, list[LLMCall], str | None, bool]:
+        """Return (response, calls, transport_error, fresh).
+
+        ``fresh`` is True only when ``response`` is a brand-new model response
+        the caller must archive (with an index decision made by the caller after
+        parsing). A cached response is returned with its archived ``LLMCall``.
+        A cached response that no longer parses is treated as a cache miss and
+        falls through to a fresh call.
+        """
         cached = store.find_llm_call(
             purpose=purpose, model=model, params=params, prompt=prompt
         )
         if cached is not None:
             candidate = _read_call_response(store, cached)
             try:
-                parse_drafts_with_errors(candidate)
+                parse_drafts_with_errors(candidate, include_address=include_address)
             except ValueError:
-                # A cached unparseable original goes straight to the repair
-                # prompt; returning it here lets the caller skip re-spending
-                # the original and only pay for the repair call.
-                return candidate, [cached], None
+                pass  # stale/0.4.0 bad entry: ignore, re-call the model
             else:
-                return candidate, [cached], None
+                return (
+                    LLMResponse(text=candidate, model=model, params=params),
+                    [cached],
+                    None,
+                    False,
+                )
 
-        nonlocal budget
-        if budget <= 0:
-            return None, [], "call budget exhausted"
-        budget -= 1
+        if not budget.take():
+            return None, [], "call budget exhausted", False
+
         started = time.monotonic()
         try:
             response = _complete_with_retries(
@@ -328,64 +395,119 @@ def author_drafts(
                 backoff_seconds=backoff_seconds,
             )
         except Exception as exc:  # noqa: BLE001
-            return None, [], f"transport failed: {exc}"
-        call = store.archive_llm_call(
+            return None, [], f"transport failed: {exc}", False
+
+        response.latency_ms = _latency_ms(response, started)
+        return response, [], None, True
+
+    def archive(
+        response: LLMResponse, prompt: str, *, index: bool
+    ) -> LLMCall:
+        return store.archive_llm_call(
             purpose=purpose,
             model=model,
             params=params,
             prompt=prompt,
             response=response.text,
             tokens=response.tokens,
-            latency_ms=_latency_ms(response, started),
+            latency_ms=response.latency_ms,
+            index=index,
         )
-        return response.text, [call], None
 
-    for idx, chunk in enumerate(chunks):
-        prompt = build_prompt(chunk)
-        response_text, chunk_calls, transport_error = resolve_prompt(prompt)
+    def author_one(idx: int, chunk: ProjectionChunk) -> tuple[
+        list[BindingDraft], list[LLMCall], list[ResolutionError]
+    ]:
+        try:
+            return _author_one_chunk(idx, chunk)
+        except Exception as exc:  # noqa: BLE001 - isolate one chunk's failure
+            return [], [], [ResolutionError(str(idx), chunk.key, f"chunk failed: {exc}")]
+
+    def _author_one_chunk(
+        idx: int, chunk: ProjectionChunk
+    ) -> tuple[list[BindingDraft], list[LLMCall], list[ResolutionError]]:
+        chunk_drafts: list[BindingDraft] = []
+        chunk_calls: list[LLMCall] = []
+        chunk_errors: list[ResolutionError] = []
+        prompt = build_prompt(chunk, include_address=include_address)
+
+        response, calls, transport_error, fresh = resolve_prompt(prompt)
+        chunk_calls.extend(calls)
         if transport_error is not None:
-            calls.extend(chunk_calls)
-            errors.append(ResolutionError(str(idx), chunk.key, transport_error))
-            continue
+            chunk_errors.append(
+                ResolutionError(str(idx), chunk.key, transport_error)
+            )
+            return chunk_drafts, chunk_calls, chunk_errors
 
         try:
-            chunk_drafts, field_errors = parse_drafts_with_errors(response_text)
+            chunk_drafts, field_errors = parse_drafts_with_errors(
+                response.text, include_address=include_address
+            )
         except ValueError as exc:
+            if fresh:
+                chunk_calls.append(archive(response, prompt, index=False))
             repair_prompt = (
                 prompt
                 + "\n\nYour previous response was not valid JSON. "
                 + f"Parse error: {exc}\nReturn ONLY valid JSON matching the contract."
             )
-            response_text, repair_calls, transport_error = resolve_prompt(repair_prompt)
-            chunk_calls.extend(repair_calls)
+            response, calls, transport_error, fresh = resolve_prompt(repair_prompt)
+            chunk_calls.extend(calls)
             if transport_error is not None:
-                calls.extend(chunk_calls)
-                errors.append(
+                chunk_errors.append(
                     ResolutionError(str(idx), chunk.key, f"repair {transport_error}")
                 )
-                continue
+                return chunk_drafts, chunk_calls, chunk_errors
             try:
-                chunk_drafts, field_errors = parse_drafts_with_errors(response_text)
+                chunk_drafts, field_errors = parse_drafts_with_errors(
+                    response.text, include_address=include_address
+                )
             except ValueError as exc2:
-                calls.extend(chunk_calls)
-                errors.append(
+                if fresh:
+                    chunk_calls.append(archive(response, repair_prompt, index=False))
+                chunk_errors.append(
                     ResolutionError(
                         str(idx), chunk.key, f"parse failed after repair: {exc2}"
                     )
                 )
-                continue
+                return chunk_drafts, chunk_calls, chunk_errors
+            else:
+                if fresh:
+                    chunk_calls.append(
+                        archive(response, repair_prompt, index=not field_errors)
+                    )
+        else:
+            if fresh:
+                # A response with per-field errors still parses, but indexing it
+                # would serve the same partial answer on every rerun.
+                chunk_calls.append(archive(response, prompt, index=not field_errors))
 
-        calls.extend(chunk_calls)
         call_ref = chunk_calls[-1].call_id if chunk_calls else None
         for draft in chunk_drafts:
             if draft.provenance is not None:
                 draft.provenance.llm_call_ref = call_ref
             if draft.region_id and draft.region_id in region_bbox:
                 draft.bbox = region_bbox[draft.region_id]
-        drafts.extend(chunk_drafts)
         for reason in field_errors:
-            errors.append(ResolutionError(str(idx), chunk.key, reason))
+            chunk_errors.append(ResolutionError(str(idx), chunk.key, reason))
+        return chunk_drafts, chunk_calls, chunk_errors
 
+    if max_workers <= 1:
+        results = [
+            author_one(idx, chunk) for idx, chunk in enumerate(chunks)
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(
+                executor.map(author_one, range(len(chunks)), chunks)
+            )
+
+    drafts: list[BindingDraft] = []
+    calls: list[LLMCall] = []
+    errors: list[ResolutionError] = []
+    for chunk_drafts, chunk_calls, chunk_errors in results:
+        drafts.extend(chunk_drafts)
+        calls.extend(chunk_calls)
+        errors.extend(chunk_errors)
     return drafts, calls, errors
 
 
@@ -789,6 +911,7 @@ def drafts_to_fields(
     non_answer_element_ids: set[str] | None = None,
     checkbox_conventions: list[CheckboxConvention] | None = None,
     replayed_draft_ids: set[str] | None = None,
+    page_tabs: dict[int, str] | None = None,
 ) -> list[Field]:
     elements_by_id = elements_by_id or {}
     non_answer_ids = non_answer_element_ids or set()
@@ -849,11 +972,14 @@ def drafts_to_fields(
 
             tab = None
             if region is not None:
-                tab = (
-                    tabs[page]
-                    if tabs is not None and page < len(tabs)
-                    else f"page {page}"
-                )
+                if page_tabs is not None:
+                    tab = page_tabs.get(page, f"page {page}")
+                else:
+                    tab = (
+                        tabs[page]
+                        if tabs is not None and page < len(tabs)
+                        else f"page {page}"
+                    )
 
             decision = (
                 _geometric_mark_decision(
