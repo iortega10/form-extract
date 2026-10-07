@@ -237,8 +237,8 @@ def test_pdf_marker_behaviour_unchanged(spec_pdf):
 
 def test_pipeline_version_is_in_the_cache_key(tmp_path):
     assert SCHEMA_VERSION == "2"
-    assert PROMPT_VERSION == "3"
-    assert PIPELINE_VERSION == "3"
+    assert PROMPT_VERSION == "4"
+    assert PIPELINE_VERSION == "4"
 
     base = dict(
         content_hash="abc123",

@@ -14,11 +14,14 @@ clock fields are pinned and the archive is repacked with fixed metadata.
 
 Writes one ``.xlsx`` per tab, one gold JSON and one manifest per set, and (with
 ``--canned``) perfect + mutated record dumps with their expected counter moves.
+``--canned-lines`` writes the same thing for the 0.6.0 line contract, in cell-id
+form: the response grammar with ``{Sheet!r:c}`` in place of ``row.seg``.
 
 Usage::
 
     python tools/make_gold.py --set dev --seed 20260101 --out DIR
     python tools/make_gold.py --set dev --seed 20260101 --out DIR --canned DIR/canned
+    python tools/make_gold.py --set dev --seed 20260101 --out DIR --canned-lines DIR/canned
 """
 from __future__ import annotations
 
@@ -1652,6 +1655,145 @@ def mutations(gold: dict) -> dict[str, dict]:
     return out
 
 
+# --------------------------------------------------------------------------
+# Canned LINES responses (the 0.6.0 line contract), in cell-id form.
+# --------------------------------------------------------------------------
+
+#: How a canned line names a cell: ``{Sheet!r:c}``, the gold's own element id.
+#: The generator may not import ``formextract`` and so cannot know the
+#: ``row.seg`` a lattice assigns a cell; ``tests/gold_lines.py`` substitutes each
+#: placeholder with that coordinate. Everything else in the line is the response
+#: grammar verbatim (section 3.2), so the artifact is the perfect response with
+#: the projection coordinates left for the bridge to fill in.
+_LINE_KEYS = ("O", "A", "N")
+
+
+def _line_record(kind: str, label=(), options=(), answer=(), notes=()) -> dict:
+    record = {"kind": kind, "L": list(label)}
+    for key, cells in (("O", options), ("A", answer), ("N", notes)):
+        if cells:
+            record[key] = list(cells)
+    return record
+
+
+def _render_line(record: dict) -> str:
+    parts = [record["kind"], "L=" + ",".join("{%s}" % c for c in record["L"])]
+    for key in _LINE_KEYS:
+        cells = record.get(key)
+        if cells:
+            parts.append(f"{key}=" + ",".join("{%s}" % c for c in cells))
+    return " ".join(parts)
+
+
+def _lines_doc(records_by_tab: dict, *, end: bool = True) -> dict:
+    return {
+        tab: {"lines": [_render_line(r) for r in records], "end": bool(end)}
+        for tab, records in records_by_tab.items()
+    }
+
+
+def _lines_records(gold: dict, *, drop=(), extra=()) -> dict:
+    """``{tab: [record, ...]}`` for the gold, minus ``drop`` indices, plus ``extra``.
+
+    Disposition lines come first and field lines last, matching a form read top
+    to bottom for the common header case. The order is not significant to the
+    resolver, and it makes the section-3.5 cut rule observable: the physical tail
+    of a response is always a field line, so a cut costs a field.
+    """
+    out: dict[str, list[dict]] = {tab: [] for tab in gold["tabs"]}
+    for disp in gold["dispositions"]:
+        out[disp["tab"]].append(_line_record(disp["disposition"], label=[disp["cell"]]))
+    for index, field in enumerate(gold["fields"]):
+        if index in drop:
+            continue
+        out[field["tab"]].append(
+            _line_record(
+                field["kind"],
+                label=field["label_cells"],
+                options=field["option_cells"],
+                answer=field["answer_cells"],
+                notes=field["annotation_cells"],
+            )
+        )
+    for tab, record in extra:
+        out[tab].append(record)
+    return out
+
+
+def perfect_lines(gold: dict) -> dict:
+    """``{tab: {"lines": [...], "end": True}}``: the perfect response, cell-id form.
+
+    One line per gold field (its kind and its cells in gold order) and one per
+    gold disposition; ``L``/``O``/``A``/``N`` carry ``{Sheet!r:c}`` placeholders
+    the bridge replaces with the lattice's ``row.seg``. The ``end`` terminator is
+    present, so the two sections-3.5 cut rules are both satisfied.
+    """
+    return _lines_doc(_lines_records(gold))
+
+
+def line_mutations(gold: dict) -> dict:
+    """``{name: lines_doc}``: the section-1 mutations at the line level.
+
+    ``drop_line`` loses one field; ``wrong_kind`` keeps its cells and changes its
+    kind; ``merge_two`` fuses two fields' cells into one line; ``split_one``
+    splits one line's option cells in two; ``cut_before_end`` drops the ``end``
+    terminator with a non-empty tail, so the section-3.5 rule cuts the last line.
+    """
+    out: dict[str, dict] = {}
+
+    out["drop_line"] = _lines_doc(_lines_records(gold, drop={0}))
+
+    rec = _lines_records(gold)
+    lines = rec[gold["tabs"][0]]
+    first_field = next(
+        i for i, r in enumerate(lines) if r["kind"] in ("single", "multi", "bool", "text")
+    )
+    victim = lines[first_field]
+    victim["kind"] = "bool" if victim["kind"] != "bool" else "text"
+    out["wrong_kind"] = _lines_doc(rec)
+
+    tab = gold["fields"][0]["tab"]
+    pair_index = [
+        i for i, f in enumerate(gold["fields"]) if f["tab"] == tab
+    ][:2]
+    pair = [gold["fields"][i] for i in pair_index]
+    merged = _line_record(
+        pair[0]["kind"],
+        label=pair[0]["label_cells"],
+        options=list(pair[0]["option_cells"]) + list(pair[1]["option_cells"]),
+    )
+    out["merge_two"] = _lines_doc(
+        _lines_records(gold, drop=set(pair_index), extra=[(tab, merged)])
+    )
+
+    split = next(f for f in gold["fields"] if len(f["option_cells"]) >= 2)
+    half = len(split["option_cells"]) // 2
+    parts = (
+        _line_record(split["kind"], label=split["label_cells"],
+                     options=split["option_cells"][:half]),
+        _line_record(split["kind"], label=split["label_cells"],
+                     options=split["option_cells"][half:]),
+    )
+    out["split_one"] = _lines_doc(
+        _lines_records(gold, drop={gold["fields"].index(split)},
+                       extra=[(split["tab"], p) for p in parts])
+    )
+
+    out["cut_before_end"] = _lines_doc(_lines_records(gold), end=False)
+
+    return out
+
+
+def write_canned_lines(gold: dict, canned_dir: Path) -> None:
+    canned_dir.mkdir(parents=True, exist_ok=True)
+    set_name = gold["set"]
+    doc = {"set": set_name, "perfect": perfect_lines(gold),
+           "mutations": line_mutations(gold)}
+    (canned_dir / f"lines_{set_name}.json").write_text(
+        json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+
 def write_canned(gold: dict, canned_dir: Path) -> None:
     canned_dir.mkdir(parents=True, exist_ok=True)
     set_name = gold["set"]
@@ -1671,6 +1813,13 @@ def main(argv=None) -> int:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--canned", type=Path, default=None)
+    parser.add_argument(
+        "--canned-lines",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="write the 0.6.0 line-contract canned responses (cell-id form) here",
+    )
     parser.add_argument(
         "--print-conventions",
         type=Path,
@@ -1692,6 +1841,8 @@ def main(argv=None) -> int:
     gold, manifest, _ = build_set(args.set, seed, args.out)
     if args.canned is not None:
         write_canned(gold, args.canned)
+    if args.canned_lines is not None:
+        write_canned_lines(gold, args.canned_lines)
     print(
         f"{args.set}: {len(manifest['tabs'])} tabs, "
         f"{manifest['fields']} fields, {manifest['cells']} cells, seed {seed}"

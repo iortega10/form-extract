@@ -36,6 +36,7 @@ from .resolve import (
     drafts_resolve_cleanly,
     drafts_to_fields,
     project_chunks,
+    project_lines_chunks,
     remap_drafts_for_page,
 )
 from .reuse import apply_binding
@@ -117,6 +118,19 @@ def validate_min_coverage(value) -> None:
         raise ValueError("min_coverage must be None or a number in (0, 1]")
     if not 0 < float(value) <= 1:
         raise ValueError("min_coverage must be in (0, 1]")
+
+
+#: The output contracts a run may name (0.6.0-L1b). "json" is the 0.5.0
+#: contract and stays the default until the owner reads the live gold run.
+OUTPUT_CONTRACTS = ("json", "lines")
+
+
+def validate_output_contract(value) -> None:
+    """Raise ValueError unless `output_contract` is one of the known contracts."""
+    if value not in OUTPUT_CONTRACTS:
+        raise ValueError(
+            f"output_contract must be one of {OUTPUT_CONTRACTS!r}, got {value!r}"
+        )
 
 
 def _normalize_checkbox_conventions(selectors) -> list[CheckboxConvention]:
@@ -252,6 +266,7 @@ def compute_cache_key(
     reuse_layout_bindings: bool = False,
     include_address: bool = False,
     min_coverage: float | None = None,
+    output_contract: str = "json",
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
@@ -280,6 +295,12 @@ def compute_cache_key(
     # config (and carries coverage=[], the cost of not invalidating).
     if min_coverage is not None:
         parts.append(f"mincov={float(min_coverage)!r}")
+    # One canonical token appended whenever the contract is not the json
+    # default, so a toggled knob can never alias a stale json instance, and a
+    # third contract can never alias "lines".
+    contract_token = output_contract if isinstance(output_contract, str) else repr(output_contract)
+    if contract_token != "json":
+        parts.append(f"contract={contract_token}")
     joined = "|".join(parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
@@ -336,7 +357,11 @@ class PipelineConfig:
     block into a status rule: every eligible tab whose ratio is below it adds
     one error and makes the run ``partial``. No threshold is defensible from one
     file, so the integrator picks it; ``None`` leaves status and errors exactly
-    as they were before the block existed.
+    as they were before the block existed. ``output_contract`` (default
+    ``"json"``, the 0.5.0 contract) selects what the model writes: ``"json"``
+    keeps the prompt and projection byte-identical to 0.5.0, ``"lines"`` uses
+    the row-indexed line grammar (no repair call; see ``resolve``). It is
+    appended to the cache key whenever it is not ``"json"``.
     """
 
     model: str = "gpt-4o-mini"
@@ -349,6 +374,7 @@ class PipelineConfig:
     include_address: bool = False
     chunk_workers: int = 1
     min_coverage: float | None = None
+    output_contract: str = "json"
 
 
 class Pipeline:
@@ -364,6 +390,7 @@ class Pipeline:
         validate_non_answer_columns(self.config.non_answer_columns)
         validate_chunk_workers(self.config.chunk_workers)
         validate_min_coverage(self.config.min_coverage)
+        validate_output_contract(self.config.output_contract)
         self._checkbox_conventions = _normalize_checkbox_conventions(
             self.config.checkbox_conventions
         )
@@ -380,6 +407,9 @@ class Pipeline:
         """
         elements_by_id = {e.element_id: e for e in elements}
         region_bbox = {r.region_id: r.bbox for r in layout.regions}
+        non_answer_ids = _resolve_non_answer_element_ids(
+            elements, self.config.non_answer_columns
+        )
 
         # Phase A: key every chunk and pick the first chunk of each distinct
         # (geometry signature, anchor multiset) key as its exemplar.
@@ -411,6 +441,10 @@ class Pipeline:
                 purpose=self.config.purpose,
                 include_address=self.config.include_address,
                 force=force,
+                output_contract=self.config.output_contract,
+                layout=layout,
+                elements_by_id=elements_by_id,
+                non_answer_element_ids=non_answer_ids,
             )
 
         def author_many(indices):
@@ -505,6 +539,7 @@ class Pipeline:
             reuse_layout_bindings=self.config.reuse_layout_bindings,
             include_address=self.config.include_address,
             min_coverage=self.config.min_coverage,
+            output_contract=self.config.output_contract,
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -578,14 +613,24 @@ class Pipeline:
                 elements, self.config.non_answer_columns
             )
             layout = analyze(elements, non_answer_element_ids=non_answer_ids)
+            elements_by_id = {e.element_id: e for e in elements}
             if self.llm_client is not None:
-                chunks = project_chunks(
-                    layout,
-                    elements,
-                    tabs,
-                    non_answer_element_ids=non_answer_ids,
-                    page_tabs=page_tabs,
-                )
+                if self.config.output_contract == "lines":
+                    chunks = project_lines_chunks(
+                        layout,
+                        elements,
+                        tabs,
+                        non_answer_element_ids=non_answer_ids,
+                        page_tabs=page_tabs,
+                    )
+                else:
+                    chunks = project_chunks(
+                        layout,
+                        elements,
+                        tabs,
+                        non_answer_element_ids=non_answer_ids,
+                        page_tabs=page_tabs,
+                    )
                 try:
                     if self.config.reuse_layout_bindings:
                         drafts, calls, resolve_errors, replayed_draft_ids = (
@@ -596,7 +641,7 @@ class Pipeline:
                         fields = drafts_to_fields(
                             drafts,
                             layout=layout,
-                            elements_by_id={e.element_id: e for e in elements},
+                            elements_by_id=elements_by_id,
                             tabs=tabs,
                             non_answer_element_ids=non_answer_ids,
                             checkbox_conventions=self._checkbox_conventions,
@@ -615,11 +660,15 @@ class Pipeline:
                             max_workers=self.config.chunk_workers,
                             include_address=self.config.include_address,
                             force=force,
+                            output_contract=self.config.output_contract,
+                            layout=layout,
+                            elements_by_id=elements_by_id,
+                            non_answer_element_ids=non_answer_ids,
                         )
                         fields = drafts_to_fields(
                             drafts,
                             layout=layout,
-                            elements_by_id={e.element_id: e for e in elements},
+                            elements_by_id=elements_by_id,
                             tabs=tabs,
                             non_answer_element_ids=non_answer_ids,
                             checkbox_conventions=self._checkbox_conventions,

@@ -748,14 +748,17 @@ def _score_gold(gold_doc: dict, dump: dict) -> dict:
 
 
 def run_gold_once(
-    *, gold_dir, provider, base_url, key, model, params, max_tokens, workers
+    *, gold_dir, provider, base_url, key, model, params, max_tokens, workers,
+    contract="json",
 ) -> tuple[dict, dict, "_ProviderClient", float]:
     """Run every gold tab through the real Pipeline.
 
     A throwaway Store in a temp dir (nothing archived under the repo, the temp
     store is deleted), the gold's own conventions declared, ``workers`` as
-    ``chunk_workers``. Returns ``(dump, gold_doc, client, seconds)`` where
-    ``dump`` is one record dump of every tab's fields.
+    ``chunk_workers`` and ``contract`` as ``output_contract`` (``json`` or
+    ``lines``, so one gold set can be measured under both). Returns ``(dump,
+    gold_doc, client, seconds)`` where ``dump`` is one record dump of every tab's
+    fields.
     """
     gold_dir = Path(gold_dir)
     gold_doc, manifest = _load_gold_dir(gold_dir)
@@ -765,6 +768,7 @@ def run_gold_once(
         params=params,
         checkbox_conventions=list(gold_doc.get("checkbox_conventions") or []),
         chunk_workers=workers,
+        output_contract=contract,
     )
     client = _ProviderClient(
         provider=provider, base_url=base_url, key=key, max_tokens=max_tokens
@@ -841,6 +845,7 @@ def _execute_gold(args, key: str, base_url: str, params: dict[str, Any]) -> dict
         params=params,
         max_tokens=args.max_tokens,
         workers=args.workers,
+        contract=args.contract,
     )
     if args.record_out:
         with open(args.record_out, "w", encoding="utf-8") as handle:
@@ -902,6 +907,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="run every tab of a make_gold --out directory through the real "
         "Pipeline with the gold's own conventions and print one line of numbers",
+    )
+    parser.add_argument(
+        "--contract",
+        choices=("json", "lines"),
+        default="json",
+        help="output contract to run --gold under: the json baseline or the "
+        "0.6.0 row lines",
     )
     parser.add_argument(
         "--record-out",

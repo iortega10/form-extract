@@ -135,8 +135,80 @@ single schema version bump per output-changing release.
   The trailing segment is now decided *before* it is parsed, so a dropped tail
   costs one step, not one per item (a 10 MB single line: 9.1 s fully parsed,
   0.011 s when dropped), asserted through the repo's `steps` counter.
+- **The lines output contract, behind `PipelineConfig.output_contract="lines"`
+  (L1b).** The default stays `"json"` (the 0.5.0 contract, byte-identical). In
+  lines mode the projection is one line per page-global lattice row
+  (`project_lines_chunks`, a new function; `project_chunks` is untouched), the
+  prompt is `build_lines_prompt` (the section 3.2-3.4 grammar), and the response
+  is read by `parse_lines_response`, which resolves every `row.seg` ref through
+  the lattice, expands spans, and derives one `BindingDraft` per field line
+  exactly as section 4 says: the label is the `L` cells' `strip_marks` text in
+  reading order (never model text), options are one per `O` element (`+` joins
+  into one, literals as written, an empty `O` cell is a mark), annotations are
+  the `N` cells, the `A` cells are the text answer for a text field and a
+  second-opinion selection otherwise, `region_id` and the anchor band come from
+  the reading-order-first `L` cell, and `hdr`/`note`/`skip` lines produce no
+  field but are returned as dispositions. Every marker classification the
+  field's `L`/`O`/`A` cells touch is injected into the field's glyph set, so
+  `_geometric_mark_decision` sees a mark the model did not cite (a
+  BETWEEN/COMPETING marker shared by two side-by-side fields over-flags both
+  with `AMBIGUOUS_MARK`). A ref that resolves to nothing becomes a sentinel that
+  fails the resolver's bounds check into `unresolved_source_refs`, so a bad
+  response can never raise. There is no repair call on this path (a parser has
+  nothing to repair) and a response is indexed in the call cache only when it
+  parsed with no line errors, was not cut and was not empty; a bad response is
+  listed as an `LLMCall` either way. `BindingDraft` gains a defaulted
+  `answer_refs` (the `A` refs of a text field, empty on the json path) and a
+  defaulted `review_reason`; `reuse.apply_binding` re-reads a replayed text
+  answer from the TARGET tab's `answer_refs`, which fixes the one-region defect
+  the "drop the refs in the label region" rule has — for the lines path only,
+  since the json path leaves `answer_refs` empty and keeps its rule unchanged.
+  `drafts_to_fields` now also cross-checks a `declared_convention` decision
+  against the stated selection (it had no check before).
+- **The 0.6.0 offline harness for the lines contract.** `tools/make_gold.py
+  --canned-lines DIR` writes `lines_<set>.json`, the perfect response per tab
+  plus five line-level mutations (`drop_line`, `wrong_kind`, `merge_two`,
+  `split_one`, `cut_before_end`) in cell-id form (`hdr L={Hold01!1:1}`): the
+  generator never imports `formextract`, so it cannot know the `row.seg` a
+  lattice assigns a cell, and `tests/gold_lines.py` substitutes each `{cell}`
+  with that coordinate. `tests/test_060_lines_gold.py` drives the real
+  `Pipeline` with those responses and scores them with the stdlib scorer:
+  perfect lines reach strict 1.0 on dev (244/244) and held-out (117/117), the
+  mutation table moves exactly the named counters, and the failure modes (a bad
+  ref into `unresolved_source_refs`, an unknown kind into `AMBIGUOUS_ROLE`, a
+  cut into a dropped tail and a PARTIAL run, an empty response) are pinned.
+  `tools/live_probe.py --gold DIR --contract {json,lines}` (default `json`)
+  lets the reviewer measure both contracts on one gold set under one version.
+
+### Known issues
+
+- **The lines contract cannot derive a mark that shares its band with several
+  options, so it loses selections the json contract keeps.** A mark in a
+  spreadsheet row gets every option-like cell to its right as a candidate, so it
+  classifies `COMPETING` (or `BETWEEN`); `_geometric_mark_decision`'s
+  short-circuits stay ahead of the right-only union and `_apply_declared_convention`
+  converts only `BETWEEN`, so a row holding several options in one band (a
+  single-row Yes/No control, a dense multi-select, a 50-option grid) yields no
+  mark at all where the model states none. Measured on the gold set:
+  `selected_ok` `100/180` (dev) and `57/91` (held-out) for `lines`, against
+  `180/180` for `json` with the same declared conventions; `stacked_multi`,
+  `matrix` and `typed_value` derive every mark. This is the gap T8 left on
+  purpose; the fix is a resolver semantics change (union the
+  convention-eligible `competing`/`between` marks per field), out of L1b's stop
+  line, and `tests/test_060_lines_gold.py::test_marker_rows_that_geometry_cannot_derive`
+  pins the numbers so a fix must update the pin deliberately.
 
 ### Changed
+
+- **`PROMPT_VERSION` and `PIPELINE_VERSION` are now `"4"`.** The lines output
+  contract ships beside the JSON one, so every instance key moves once.
+  `SCHEMA_VERSION` stays `"2"`: `BindingDraft.answer_refs`/`review_reason` are
+  defaulted and additive. The default json prompt and projection are
+  byte-identical to 0.5.0 and the call cache keys on the prompt text, so cached
+  0.5.x calls are still served even though the instance key misses.
+  `compute_cache_key` appends one canonical `contract=<name>` token whenever
+  `output_contract` is not the json default, so a toggled contract can never
+  alias a stale instance.
 
 - **Deterministic order for drafts tied on an anchor band.** `drafts_to_fields`
   now breaks a tie on the anchor band with the smallest `(band, segment)` the

@@ -16,7 +16,12 @@ from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 # 0.5.0 moves this to "3": the default prompt no longer asks for `address`
 # (PipelineConfig.include_address defaults False), so default output changed
 # and cached 0.4.0 records must not be served.
-PIPELINE_VERSION = "3"
+# 0.6.0-L1b moves this to "4": the lines output contract ships beside the JSON
+# one (PipelineConfig.output_contract, default "json"), so every instance key
+# moves once. The default json prompt and projection stay byte-identical to
+# 0.5.0 and the call cache keys on the prompt text, so cached 0.5.x calls are
+# still served even though the instance key misses.
+PIPELINE_VERSION = "4"
 
 
 class RegionType(str, Enum):
@@ -343,6 +348,17 @@ class BindingDraft:
     #: region-less field still reports its tab (and a tab-matched convention can
     #: still apply to it). Never serialised: it is not part of a record.
     tab: str | None = None
+    #: 0.6.0-L1b lines contract: the ``A=`` refs of a TEXT field, so a reused
+    #: tab re-reads the value from the TARGET tab's own cells (``reuse.py``)
+    #: instead of the label-region drop rule. Empty on the JSON path, which
+    #: keeps its current replay rule (and therefore its byte-identical output).
+    #: Defaulted and additive: SCHEMA_VERSION stays 2.
+    answer_refs: tuple[ElementRef, ...] = ()
+    #: 0.6.0-L1b lines contract: a review reason the parser decided without
+    #: re-scanning the refs (an unknown kind degrades to ``AMBIGUOUS_ROLE``).
+    #: The resolver honours it after its own unresolved-ref and ambiguity flags.
+    #: ``None`` on the JSON path.
+    review_reason: ReviewReason | None = None
 
 
 @dataclass

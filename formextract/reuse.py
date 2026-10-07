@@ -55,13 +55,9 @@ def apply_binding(
             return None
         return band[ref.segment_index]
 
-    for draft in binding_drafts:
-        if draft.control_type is not ControlType.TEXT:
-            continue
-        value_texts: list[str] = []
-        for ref in draft.source_refs:
-            if ref.region_id == draft.region_id:
-                continue  # the anchor/label element lives in the label region
+    def value_texts_of(refs) -> list[str]:
+        texts: list[str] = []
+        for ref in refs:
             element_id = resolve(ref)
             if element_id is None or element_id in glyph_ids:
                 continue
@@ -70,7 +66,27 @@ def apply_binding(
                 continue
             text = strip_marks(element.text)
             if text:
-                value_texts.append(text)
+                texts.append(text)
+        return texts
+
+    for draft in binding_drafts:
+        if draft.control_type is not ControlType.TEXT:
+            continue
+        if draft.answer_refs:
+            # 0.6.0-L1b lines contract: ``answer_refs`` name the value cells
+            # directly, so the value is re-read from the TARGET tab even when
+            # the label region holds the whole row (the one-region defect the
+            # label-region drop rule has). The JSON path leaves ``answer_refs``
+            # empty and keeps that rule byte-identically.
+            value_texts = value_texts_of(list(draft.answer_refs))
+        else:
+            value_texts = value_texts_of(
+                [
+                    ref
+                    for ref in draft.source_refs
+                    if ref.region_id != draft.region_id  # drop the label element
+                ]
+            )
         draft.answers = [" ".join(value_texts)] if value_texts else []
 
     return binding_drafts
