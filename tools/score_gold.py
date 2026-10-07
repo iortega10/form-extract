@@ -37,12 +37,19 @@ _KIND_BY_CONTROL = {
     "multi": "multi",
 }
 
+#: The closed set a field kind can take. ``kind_confusion_pairs`` keys are built
+#: only from these (never from any sheet text).
+KIND_VOCAB = ("single", "multi", "bool", "text")
+
 #: Integer counters reported overall and per tag. The mutation table in the
-#: test diffs exactly these.
+#: test diffs exactly these. ``kind_confusion_pairs`` is a small count table,
+#: not an integer, so it travels beside these keys rather than inside them.
 COUNTER_KEYS = (
     "gold_fields",
     "predicted_fields",
     "matched",
+    "matched_ignoring_kind",
+    "kind_confusions",
     "merge_count",
     "split_count",
     "missed",
@@ -234,6 +241,33 @@ def _subscore(gold_fields: list[dict], predicted: list[dict], cited: set[str]) -
             used_gold.add(id(g))
             matched.append((p, g))
 
+    # The same greedy walk keyed on the identity alone: the grouping question,
+    # with the kind question set aside. A gold identity is unique, so every
+    # strictly matched field is an ignoring-kind match too and the two counts
+    # differ by exactly the fields whose kind was guessed wrong.
+    gold_by_identity: dict[frozenset, dict] = {}
+    for g in gold_fields:
+        gold_by_identity.setdefault(g["identity"], g)
+    matched_ignoring_kind: list[tuple[dict, dict]] = []
+    used_gold_ik: set[int] = set()
+    for p in predicted:
+        g = gold_by_identity.get(p["identity"])
+        if g is not None and id(g) not in used_gold_ik:
+            used_gold_ik.add(id(g))
+            matched_ignoring_kind.append((p, g))
+
+    matched_n = len(matched)
+    matched_ik_n = len(matched_ignoring_kind)
+    kind_confusions = matched_ik_n - matched_n
+    strictly_matched_gold = {id(g) for _, g in matched}
+    kind_confusion_pairs: dict[str, int] = {}
+    for p, g in matched_ignoring_kind:
+        if id(g) in strictly_matched_gold:
+            continue
+        predicted_kind = p["kind"] if p["kind"] in KIND_VOCAB else "none"
+        key = f"{g['kind']}>{predicted_kind}"
+        kind_confusion_pairs[key] = kind_confusion_pairs.get(key, 0) + 1
+
     merge_count = sum(
         1
         for p in predicted
@@ -303,6 +337,9 @@ def _subscore(gold_fields: list[dict], predicted: list[dict], cited: set[str]) -
         "gold_fields": len(gold_fields),
         "predicted_fields": len(predicted),
         "matched": matched_n,
+        "matched_ignoring_kind": matched_ik_n,
+        "kind_confusions": kind_confusions,
+        "kind_confusion_pairs": kind_confusion_pairs,
         "merge_count": merge_count,
         "split_count": split_count,
         "missed": missed,
@@ -394,11 +431,21 @@ def _frac(num: int, den: int, ratio: float | None) -> str:
     return f"{num}/{den}={_pct(ratio)}"
 
 
+def _pairs_text(pairs: dict) -> str:
+    """``kind_confusion_pairs`` as ``<gold>><predicted>=n``, kinds only."""
+    if not pairs:
+        return "none"
+    return ",".join(f"{key}={pairs[key]}" for key in sorted(pairs))
+
+
 def format_text(result: dict) -> str:
     o = result["overall"]
     lines = [
         f"gold_fields {o['gold_fields']} predicted_fields {o['predicted_fields']} "
         f"matched {o['matched']}",
+        f"matched_ignoring_kind {o['matched_ignoring_kind']} "
+        f"kind_confusions {o['kind_confusions']} "
+        f"kind_confusion_pairs {_pairs_text(o['kind_confusion_pairs'])}",
         f"precision {_frac(o['precision_num'], o['precision_den'], o['precision'])} "
         f"recall {_frac(o['recall_num'], o['recall_den'], o['recall'])}",
         f"merge_count {o['merge_count']} split_count {o['split_count']} "
@@ -426,6 +473,8 @@ def format_text(result: dict) -> str:
         mark = " [small_n]" if t["small_n"] else ""
         lines.append(
             f"  {tag}: gold {t['gold_fields']} matched {t['matched']} "
+            f"matched_ignoring_kind {t['matched_ignoring_kind']} "
+            f"kind_confusions {t['kind_confusions']} "
             f"precision {_frac(t['precision_num'], t['precision_den'], t['precision'])} "
             f"recall {_frac(t['recall_num'], t['recall_den'], t['recall'])} "
             f"missed {t['missed']} spurious {t['spurious']} "

@@ -374,6 +374,21 @@ mixed tabs leaves every homogeneous tab's bytes unchanged (a committed sha256
 table guards it). Regeneration is deterministic: the same `--seed` and `--set`
 produce byte-identical files.
 
+`--gold-version {2,3}` picks the gold schema. **3** (the default for a new set)
+makes a field's **kind readable from the sheet**: a question label alone leaves
+`single` vs `multi` and `bool` vs `text` a coin flip, so every label carries a
+kind cue — multi-select and grid fields end `(select all that apply)`, the other
+single-selects (side-by-side, matrix, no-glyph) end `(choose one)`, the affirm/
+dissent yes/no rows keep the plain question, text fields are rewritten as
+imperatives (`Enter the …`) and the typed-value fields as noun phrases
+(`… of the …`). The cue is recorded per field as `kind_cue` (a closed vocabulary:
+`plain_question`, `select_all_that_apply`, `choose_one`, `imperative`,
+`noun_phrase`). **2** is frozen: it reproduces the earlier sets, tabs and gold
+JSON, byte for byte, and omits `kind_cue`. A v3 set has the same fields, cells
+and selections as its v2 twin — only the label wording changes — so the two
+versions score identically on a perfect response and differ only in what a model
+can read off the sheet.
+
 Every tab records the checkbox convention its generator used, in a
 `checkbox_conventions` list written in exactly the shape
 `PipelineConfig.checkbox_conventions` takes (here: one selector per tab,
@@ -405,6 +420,23 @@ predicted field cites). Every number is also reported per structure tag
 only integers, percentages and tag names — never a label, a cell text or a tab
 name — so the same scorer can be run on your own workbook's gold: it prints
 numbers only.
+
+**Two scores, not one.** The strict `matched` count needs the field's element set
+*and* its kind to agree. That conflates two different questions — did the model
+**group** the cells into the right field, and did it **guess the kind** — so the
+scorer reports both. `matched_ignoring_kind` matches on the element set alone (a
+predicted field whose L∪O element ids equal a gold field's set, kind ignored; at
+most one predicted per gold, in the same greedy order as the strict matcher) and
+is never below `matched`. `kind_confusions` is the gap: gold fields matched
+ignoring kind but not strictly, i.e. fields the model grouped correctly and typed
+wrongly. The identity `matched_ignoring_kind == matched + kind_confusions` holds
+by construction. `kind_confusion_pairs` is the direction of those mistakes, a
+small closed-vocabulary count table keyed `"<gold kind>><predicted kind>"` (kinds
+`single`/`multi`/`bool`/`text`) — never text from the sheet. Read `matched` as the
+score when kind matters, `matched_ignoring_kind` as the ceiling a correct grouping
+would reach, and `kind_confusions` as the part of the gap a better prompt (or a
+better gold) could still close. `live_probe.py --gold` forwards the same three
+counters, overall and per tag.
 
 To score a whole gold set end to end, run every tab through the real pipeline and
 print one line of numbers:

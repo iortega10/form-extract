@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,29 @@ if str(REPO / "tools") not in sys.path:
 import make_gold  # noqa: E402
 import score_gold  # noqa: E402
 
+#: The words a prompt variant can hand the model to copy: the words of every
+#: example line and of every quoted literal (the same rule the prompt-variant
+#: test uses). The cue words must not appear here.
+_VARIANT_EXAMPLE_LINE = re.compile(
+    r"^  (?:single|multi|bool|text|hdr|note|skip)\b.*$", re.M
+)
+_VARIANT_QUOTED = re.compile(r'"([^"]*)"')
+WORD = re.compile(r"[A-Za-z]+")
+
+
+def _variant_copyable_words() -> set[str]:
+    from formextract.resolve import LINES_PROMPT_VARIANTS, ProjectionChunk
+
+    chunk = ProjectionChunk(key="Probe", text="0: 0=Alpha widget variant? | 1=X")
+    words: set[str] = set()
+    for make_prompt in LINES_PROMPT_VARIANTS.values():
+        text = make_prompt(chunk)
+        for snippet in (
+            _VARIANT_EXAMPLE_LINE.findall(text) + _VARIANT_QUOTED.findall(text)
+        ):
+            words.update(word.lower() for word in WORD.findall(snippet))
+    return words
+
 
 # --------------------------------------------------------------------------
 # Fixtures: build the dev and held-out sets once per module.
@@ -21,14 +45,40 @@ import score_gold  # noqa: E402
 
 @pytest.fixture(scope="module")
 def gold(tmp_path_factory):
+    """The gold v2 set: the frozen schema the committed tables below pin."""
     base = tmp_path_factory.mktemp("gold")
     dev_dir = base / "dev"
     held_dir = base / "heldout"
     dev_gold, dev_manifest, _ = make_gold.build_set(
-        "dev", make_gold.DEFAULT_SEEDS["dev"], dev_dir
+        "dev", make_gold.DEFAULT_SEEDS["dev"], dev_dir, gold_version=2
     )
     held_gold, held_manifest, _ = make_gold.build_set(
-        "heldout", make_gold.DEFAULT_SEEDS["heldout"], held_dir
+        "heldout", make_gold.DEFAULT_SEEDS["heldout"], held_dir, gold_version=2
+    )
+    make_gold.write_canned(dev_gold, dev_dir / "canned")
+    make_gold.write_canned(held_gold, held_dir / "canned")
+    return {
+        "base": base,
+        "dev_dir": dev_dir,
+        "held_dir": held_dir,
+        "dev_gold": dev_gold,
+        "dev_manifest": dev_manifest,
+        "held_gold": held_gold,
+        "held_manifest": held_manifest,
+    }
+
+
+@pytest.fixture(scope="module")
+def gold_v3(tmp_path_factory):
+    """The gold v3 set (the generator's default): the kind cue is in the gold."""
+    base = tmp_path_factory.mktemp("gold-v3")
+    dev_dir = base / "dev"
+    held_dir = base / "heldout"
+    dev_gold, dev_manifest, _ = make_gold.build_set(
+        "dev", make_gold.DEFAULT_SEEDS["dev"], dev_dir, gold_version=3
+    )
+    held_gold, held_manifest, _ = make_gold.build_set(
+        "heldout", make_gold.DEFAULT_SEEDS["heldout"], held_dir, gold_version=3
     )
     make_gold.write_canned(dev_gold, dev_dir / "canned")
     make_gold.write_canned(held_gold, held_dir / "canned")
@@ -69,13 +119,16 @@ def _load_record(path: Path) -> dict:
 
 
 def _overall(gold_doc: dict, record_path: Path) -> dict:
+    return _score(gold_doc, _load_record(record_path))["overall"]
+
+
+def _score(gold_doc: dict, record: dict) -> dict:
     g = score_gold.Gold(gold_doc)
-    record = _load_record(record_path)
     predicted, stray, unresolved = score_gold._predicted_fields(
         g, score_gold._extract_fields(record)
     )
     disposition = score_gold._disposition_accuracy(g, record)
-    return score_gold.score_document(g, predicted, stray, unresolved, disposition)["overall"]
+    return score_gold.score_document(g, predicted, stray, unresolved, disposition)
 
 
 # --------------------------------------------------------------------------
@@ -113,10 +166,49 @@ OLD_TAB_SHA256 = {
     },
 }
 
+#: sha256 of every tab of the gold v3 set (the generator's default). v3 changes
+#: only the label wording, so the two tabs whose structures all keep the plain
+#: question (Dev01 yes/no rows) are byte-identical to v2 and the rest are not.
+#: These rows are the v3 counterpart of OLD_TAB_SHA256 and pin the generated
+#: bytes the same way.
+V3_TAB_SHA256 = {
+    "dev": {
+        "Dev01": "2dc20f1c91027f95bcf839b75bbcb9b95392894c9a0e530d9dcb81771d232cf9",
+        "Dev02": "6b2238999ccc1d5c9e50a979237a3a4006db8d4d193daf4e4c9be03a794d3c53",
+        "Dev03": "6b779a6fe0844484f270c3186cb7ff6c79934f148f5e44e036c09c999b7a8398",
+        "Dev04": "554d9124d29707bf5910c51682a6361ab368217ce2e6d45d9796e7a06c3eccbc",
+        "Dev05": "25b70dbd5507134040c8e29e1f7cb40b2b653cfc293c2d21b283b84b62e2f842",
+        "Dev06": "deef816dcd986e998e70141f25aff0c57159933512e59d1228bc53c470866563",
+        "Dev07": "6edc2014eefb763c8fe32096015e8a300227a0c27ff15e558332eb8778f3ebd1",
+        "Dev08": "470f2fcd20d6a124248ce6a9309d595478f6e1c2fbb463924e24f099bf6e8b3b",
+        "Dev09": "6555763fac0a129ecb9e0db24954cc9d7e7ca037e557425960c80561f5abd8ed",
+        "Dev10": "233e1085bd7026abbc9d98d891ead8eabcbe26c4e4a694fd8978a1a03df93f44",
+        "Dev11": "bce355559bdd1a2715fcfddcb21837d281ffe0a44f1fe07c4e0f27a09f37ff39",
+        "Dev12": "b2b2a4faae1b1dce44d63df187e20287425f22554f9d79e2436f220c8110ca3f",
+        "Dev13": "6a63069fd9e1a5c457b16016e776baeefcef6c9c0fb2ddf07b9befd0473288cd",
+        "Dev14": "54fd56bf543952fc3fa4673542ce59a625869bd677f4c408c91e6b1d62063868",
+        "Dev15": "231297fbacee9c775c32fa539d971ec4788ac28624fd733a41b64fb155c01b67",
+        "Dev16": "dae6a55c166c1215c42fcd034422edcfc3b7b23aa4c5d09d32fccc5d806cbc6a",
+    },
+    "heldout": {
+        "Hold01": "69d51aefc118e4b12b4b04ad32220f6baeee542b996abebac6675b8f03e2401a",
+        "Hold02": "d86ad118394207274c6b883a04a4c95cf49f3e1126d4d05887a40684b9abadb4",
+        "Hold03": "cbc6571591e2292da5ba3cd59fb909fa2564a69fc5137e704d22156cdc8cbc16",
+        "Hold04": "10dca1d00f99facedfdbe7183652ec6ed6545fa1a113f3beb71e5c4056b18ec3",
+        "Hold05": "2b5f1bfa115f91cf113ab99e976dcbe84fee7350e7be308f701f5778d2116cfd",
+        "Hold06": "2bc9ccd7942b0ced59776eec68f0827110dad0fa74d3ec38d7ec7ab5aa37fa3e",
+        "Hold07": "d30df1bac69a4581f6d03e139c158daae3e5d3af0126a2110809dc6d3f12642f",
+        "Hold08": "b0ad4c4fdda65d8989709f3557432b2613dd1c593a116804e0e9055178836678",
+    },
+}
+
 PERFECT_COUNTERS = {
     "gold_fields": 244,
     "predicted_fields": 244,
     "matched": 244,
+    "matched_ignoring_kind": 244,
+    "kind_confusions": 0,
+    "kind_confusion_pairs": {},
     "merge_count": 0,
     "split_count": 0,
     "missed": 0,
@@ -151,7 +243,8 @@ MUTATION_DELTAS = {
         "unexpected_ambiguous": 58,
     },
     "drop_field": {
-        "predicted_fields": -1, "matched": -1, "missed": 1, "label_ok": -1,
+        "predicted_fields": -1, "matched": -1, "matched_ignoring_kind": -1,
+        "missed": 1, "label_ok": -1,
         "label_total": -1, "options_ok": -1, "options_total": -1,
         "selected_ok": -1, "selected_total": -1,
         "selected_ok_under_convention": -1, "addressed_num": -4,
@@ -161,7 +254,8 @@ MUTATION_DELTAS = {
         "predicted_fields": 1, "spurious": 1, "precision_den": 1,
     },
     "empty_fields": {
-        "predicted_fields": -244, "matched": -244, "missed": 244,
+        "predicted_fields": -244, "matched": -244, "matched_ignoring_kind": -244,
+        "missed": 244,
         "label_ok": -244, "label_total": -244, "options_ok": -244,
         "options_total": -244, "selected_ok": -180, "selected_total": -180,
         "selected_ok_under_convention": -170, "selected_ambiguous_expected": -10,
@@ -169,21 +263,24 @@ MUTATION_DELTAS = {
         "precision_num": -244, "precision_den": -244, "recall_num": -244,
     },
     "merge_two": {
-        "predicted_fields": -1, "matched": -2, "merge_count": 1,
+        "predicted_fields": -1, "matched": -2, "matched_ignoring_kind": -2,
+        "merge_count": 1,
         "label_ok": -2, "label_total": -2, "options_ok": -2,
         "options_total": -2, "selected_ok": -2, "selected_total": -2,
         "selected_ok_under_convention": -2, "precision_num": -2,
         "precision_den": -2, "recall_num": -2, "recall_den": -2,
     },
     "missing_tab": {
-        "predicted_fields": -14, "matched": -14, "missed": 14,
+        "predicted_fields": -14, "matched": -14, "matched_ignoring_kind": -14,
+        "missed": 14,
         "label_ok": -14, "label_total": -14, "options_ok": -14,
         "options_total": -14, "selected_ok": -14, "selected_total": -14,
         "selected_ok_under_convention": -14, "addressed_num": -42,
         "precision_num": -14, "precision_den": -14, "recall_num": -14,
     },
     "split_one": {
-        "predicted_fields": 1, "matched": -1, "split_count": 1,
+        "predicted_fields": 1, "matched": -1, "matched_ignoring_kind": -1,
+        "split_count": 1,
         "label_ok": -1, "label_total": -1, "options_ok": -1,
         "options_total": -1, "selected_ok": -1, "selected_total": -1,
         "selected_ok_under_convention": -1, "precision_num": -1,
@@ -193,11 +290,19 @@ MUTATION_DELTAS = {
     "unresolved_ref": {"unresolved_ref_count": 1},
     "wrong_answer": {"answer_ok": -1},
     "wrong_kind": {
-        "matched": -1, "missed": 1, "spurious": 1, "label_ok": -1,
+        "matched": -1, "kind_confusions": 1, "missed": 1, "spurious": 1,
+        "label_ok": -1,
         "label_total": -1, "options_ok": -1, "options_total": -1,
         "selected_ok": -1, "selected_total": -1,
         "selected_ok_under_convention": -1, "precision_num": -1,
         "recall_num": -1,
+    },
+    "kind_swap": {
+        "matched": -116, "kind_confusions": 116, "missed": 116, "spurious": 116,
+        "label_ok": -116, "label_total": -116, "options_ok": -116,
+        "options_total": -116, "selected_ok": -116, "selected_total": -116,
+        "selected_ok_under_convention": -106, "selected_ambiguous_expected": -10,
+        "precision_num": -116, "recall_num": -116,
     },
     "wrong_label": {"label_ok": -1},
     "wrong_selected": {"selected_ok": -1, "selected_ok_under_convention": -1},
@@ -209,19 +314,41 @@ MUTATION_DELTAS = {
 # --------------------------------------------------------------------------
 
 def test_generator_is_deterministic(tmp_path):
-    one, _, _ = make_gold.build_set("dev", 20260101, tmp_path / "a")
-    two, _, _ = make_gold.build_set("dev", 20260101, tmp_path / "b")
-    three, _, _ = make_gold.build_set("dev", 999, tmp_path / "c")
+    """Both gold versions: the same seed is byte-identical, a different seed is not."""
+    for version in make_gold.GOLD_VERSIONS:
+        one, _, _ = make_gold.build_set("dev", 20260101, tmp_path / f"a{version}",
+                                        gold_version=version)
+        two, _, _ = make_gold.build_set("dev", 20260101, tmp_path / f"b{version}",
+                                        gold_version=version)
+        three, _, _ = make_gold.build_set("dev", 999, tmp_path / f"c{version}",
+                                          gold_version=version)
 
-    assert one == two
-    for tab in one["tabs"]:
+        assert one == two, version
+        for tab in one["tabs"]:
+            assert (tmp_path / f"a{version}" / f"{tab}.xlsx").read_bytes() == (
+                tmp_path / f"b{version}" / f"{tab}.xlsx"
+            ).read_bytes(), (version, tab)
+            assert (tmp_path / f"a{version}" / f"{tab}.xlsx").read_bytes() != (
+                tmp_path / f"c{version}" / f"{tab}.xlsx"
+            ).read_bytes(), (version, tab)
+        assert one != three, version
+
+
+def test_v3_generator_is_deterministic(tmp_path):
+    """v3 specifically: the default build is the same seed twice, a different seed differs."""
+    a, _, _ = make_gold.build_set("dev", 20260202, tmp_path / "a")
+    b, _, _ = make_gold.build_set("dev", 20260202, tmp_path / "b")
+    c, _, _ = make_gold.build_set("dev", 20260303, tmp_path / "c")
+    assert a == b
+    assert a["gold_version"] == 3
+    assert a != c
+    for tab in a["tabs"]:
         assert (tmp_path / "a" / f"{tab}.xlsx").read_bytes() == (
             tmp_path / "b" / f"{tab}.xlsx"
         ).read_bytes()
         assert (tmp_path / "a" / f"{tab}.xlsx").read_bytes() != (
             tmp_path / "c" / f"{tab}.xlsx"
         ).read_bytes()
-    assert one != three
 
 
 def test_dev_and_heldout_vocabularies_are_disjoint(gold):
@@ -238,13 +365,61 @@ def test_every_field_tag_has_at_least_six_dev_instances(gold):
         assert gold["dev_manifest"]["disposition_counts"][tag] >= 1
 
 
-def test_old_tabs_are_byte_identical(gold):
+def test_v2_tabs_are_byte_identical(gold):
     for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
         sha = gold[key]["tab_sha256"]
         for tab, expected in OLD_TAB_SHA256[set_name].items():
             assert sha[tab] == expected, (tab, sha[tab], expected)
     for tab in make_gold.MIXED_DEV_TABS:
         assert tab not in OLD_TAB_SHA256["dev"]
+
+
+def test_v3_tabs_have_a_committed_sha256_table(gold_v3):
+    for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
+        sha = gold_v3[key]["tab_sha256"]
+        assert set(sha) == set(gold_v3[key]["tabs"])
+        for tab, expected in V3_TAB_SHA256[set_name].items():
+            assert sha[tab] == expected, (tab, sha[tab], expected)
+    # v3 changes only the wording: the all-plain-question tabs keep v2's bytes,
+    # so the table is not merely the v2 table again.
+    assert V3_TAB_SHA256["dev"]["Dev01"] == OLD_TAB_SHA256["dev"]["Dev01"]
+    assert V3_TAB_SHA256["dev"]["Dev02"] != OLD_TAB_SHA256["dev"]["Dev02"]
+    assert V3_TAB_SHA256["heldout"]["Hold01"] != OLD_TAB_SHA256["heldout"]["Hold01"]
+
+
+def test_v3_field_counts_per_tag_equal_v2(gold, gold_v3):
+    assert gold["dev_manifest"]["fields"] == gold_v3["dev_manifest"]["fields"]
+    assert gold["dev_manifest"]["cells"] == gold_v3["dev_manifest"]["cells"]
+    assert gold["dev_manifest"]["tab_counts"] == gold_v3["dev_manifest"]["tab_counts"]
+    assert gold["dev_manifest"]["tag_counts"] == gold_v3["dev_manifest"]["tag_counts"]
+    assert gold["held_manifest"]["fields"] == gold_v3["held_manifest"]["fields"]
+    assert gold["held_manifest"]["tag_counts"] == gold_v3["held_manifest"]["tag_counts"]
+
+
+def test_v2_gold_has_no_kind_cue_and_v3_has_one(gold, gold_v3):
+    assert all("kind_cue" not in f for f in gold["dev_gold"]["fields"])
+    assert all("kind_cue" in f for f in gold_v3["dev_gold"]["fields"])
+    assert gold["dev_gold"]["gold_version"] == 2
+    assert gold_v3["dev_gold"]["gold_version"] == 3
+
+
+def test_v3_dev_and_heldout_vocabularies_are_disjoint(gold_v3):
+    dev = _label_option_texts(gold_v3["dev_gold"])
+    held = _label_option_texts(gold_v3["held_gold"])
+    assert dev & held == set()
+
+
+def test_v3_keeps_the_conventions_and_print_conventions_roundtrip(gold_v3, capsys):
+    doc = gold_v3["dev_gold"]
+    conventions = doc["checkbox_conventions"]
+    assert [c["tab"] for c in conventions] == doc["tabs"]
+    for entry in conventions:
+        assert set(entry) == {"tab", "anchor_pattern", "convention"}
+        assert entry["convention"] == "mark_precedes_option"
+    assert make_gold.main(
+        ["--print-conventions", str(gold_v3["dev_dir"] / "gold_dev.json")]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == conventions
 
 
 def test_manifest_declares_homogeneous_and_mixed_tabs(gold):
@@ -435,6 +610,149 @@ def test_mutations_move_exactly_the_expected_counters(gold):
             if overall[key] != base[key]
         }
         assert delta == MUTATION_DELTAS[mutation], (mutation, delta)
+
+
+def test_matched_ignoring_kind_is_matched_plus_kind_confusions(gold):
+    """The identity holds on the perfect dump and on every mutation."""
+    perfect = make_gold.perfect_record(gold["dev_gold"])
+    reports = [("perfect", _score(gold["dev_gold"], perfect))]
+    for name, rec in make_gold.mutations(gold["dev_gold"]).items():
+        reports.append((name, _score(gold["dev_gold"], rec)))
+    checked = 0
+    for name, report in reports:
+        o = report["overall"]
+        assert o["matched_ignoring_kind"] == o["matched"] + o["kind_confusions"], name
+        assert o["matched_ignoring_kind"] >= o["matched"], name
+        assert sum(o["kind_confusion_pairs"].values()) == o["kind_confusions"], name
+        checked += 1
+    assert checked >= len(MUTATION_DELTAS) + 1
+
+
+def test_kind_swap_moves_only_the_kind_counters(gold):
+    """Every single read as a multi: grouping intact, the kind counters alone move."""
+    perfect = make_gold.perfect_record(gold["dev_gold"])
+    base = _score(gold["dev_gold"], perfect)["overall"]
+    swapped = _score(gold["dev_gold"], make_gold.mutations(gold["dev_gold"])["kind_swap"])["overall"]
+
+    n_single = sum(1 for f in perfect["fields"] if f["control_type"] == "single_select")
+    assert n_single > 0
+    assert swapped["matched_ignoring_kind"] == base["matched_ignoring_kind"]
+    assert swapped["matched"] == base["matched"] - n_single
+    assert swapped["kind_confusions"] == base["kind_confusions"] + n_single
+    assert swapped["kind_confusion_pairs"] == {"single>multi": n_single}
+
+
+def test_kind_confusion_pairs_vocabulary_is_closed(gold):
+    assert tuple(score_gold.KIND_VOCAB) == ("single", "multi", "bool", "text")
+    allowed = set(score_gold.KIND_VOCAB) | {"none"}
+    seen = set()
+    for name, rec in make_gold.mutations(gold["dev_gold"]).items():
+        pairs = _score(gold["dev_gold"], rec)["overall"]["kind_confusion_pairs"]
+        for key in pairs:
+            left, _, right = key.partition(">")
+            assert left in score_gold.KIND_VOCAB, (name, key)
+            assert right in allowed, (name, key)
+            seen.add(key)
+    assert {"single>multi", "single>bool"} <= seen
+
+
+def test_text_output_reports_the_kind_counters(gold, capsys):
+    record = gold["dev_dir"] / "canned" / "kind_swap_dev.json"
+    code = score_gold.main(
+        ["--gold", str(gold["dev_dir"] / "gold_dev.json"), "--record", str(record)]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "matched_ignoring_kind 244" in out
+    assert "kind_confusions 116" in out
+    assert "kind_confusion_pairs single>multi=116" in out
+    # json carries the table too
+    code = score_gold.main(
+        ["--gold", str(gold["dev_dir"] / "gold_dev.json"), "--record", str(record),
+         "--json"]
+    )
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["overall"]["kind_confusion_pairs"] == {"single>multi": 116}
+
+
+# --------------------------------------------------------------------------
+# Gold v3: the kind cue in the label and in the gold
+# --------------------------------------------------------------------------
+
+def _cue_words() -> set[str]:
+    return {word.lower() for word in make_gold.CUE_TEMPLATE_WORDS}
+
+
+def _template_words() -> set[str]:
+    """Every word the cue templates add, read from the generator's own output."""
+    import random
+
+    pool = {kind: [f"{kind}x"] for kind in ("verb", "noun", "adj", "yesno", "typed")}
+    words = random.Random(0)
+    introduced: set[str] = set()
+    for cue in make_gold.KIND_CUES:
+        if cue == "plain_question":
+            continue
+        text = make_gold.Words(pool, words, 3).label(cue)
+        introduced.update(w for w in WORD.findall(text.lower()) if not w.endswith("x"))
+    return introduced
+
+
+def test_cue_words_are_declared_and_are_what_the_templates_add():
+    """The declared cue-word list is exactly what the templates introduce."""
+    assert _cue_words() == _template_words()
+
+
+def test_cue_words_are_disjoint_from_the_variant_examples():
+    """No cue or template word appears in a variant's example lines / literals."""
+    disjoint = _variant_copyable_words()
+    assert disjoint, "the extraction found no example line"
+    assert _cue_words() & disjoint == set(), sorted(_cue_words() & disjoint)
+    # non-vacuous: the variant examples really do carry label-like words
+    assert "single" in disjoint and "yes" in disjoint
+
+
+def test_v3_cue_rule_per_tag_from_the_gold(gold_v3):
+    """Every structure tag's label carries its cue, read from the gold cells."""
+    doc = gold_v3["dev_gold"]
+    cells = {c["id"]: c for c in doc["cells"]}
+    seen: set[str] = set()
+    for field in doc["fields"]:
+        tag = next(t for t in field["tags"] if t in make_gold.TAG_KIND_CUE)
+        cue = make_gold.TAG_KIND_CUE[tag]
+        assert field["kind_cue"] == cue, (tag, field["kind_cue"], cue)
+        label = " ".join(cells[c]["text"] for c in field["label_cells"])
+        if cue == "select_all_that_apply":
+            assert "(select all that apply)" in label, (tag, label)
+        elif cue == "choose_one":
+            assert "(choose one)" in label, (tag, label)
+        elif cue in ("imperative", "noun_phrase"):
+            assert not label.rstrip().endswith("?"), (tag, label)
+        else:
+            assert label.rstrip().endswith("?"), (tag, label)
+        seen.add(tag)
+    assert set(make_gold.TAG_KIND_CUE) <= seen
+
+    # the two structures the scorer measured as a coin flip on the sheet
+    for tag in ("dense_multi", "stacked_multi", "grid_50"):
+        labels = [
+            " ".join(cells[c]["text"] for c in f["label_cells"])
+            for f in doc["fields"] if tag in f["tags"]
+        ]
+        assert labels and all("(select all that apply)" in t for t in labels), tag
+    for tag in ("text_field", "typed_value"):
+        labels = [
+            " ".join(cells[c]["text"] for c in f["label_cells"])
+            for f in doc["fields"] if tag in f["tags"]
+        ]
+        assert labels and all(not t.rstrip().endswith("?") for t in labels), tag
+
+
+def test_v3_kind_cue_vocabulary_is_closed(gold_v3):
+    cues = {f["kind_cue"] for f in gold_v3["dev_gold"]["fields"]}
+    assert cues <= set(make_gold.KIND_CUES)
+    assert cues == set(make_gold.KIND_CUES)  # every cue is exercised at least once
 
 
 # --------------------------------------------------------------------------

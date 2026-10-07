@@ -204,6 +204,29 @@ single schema version bump per output-changing release.
   name as `prompt_variant`. The variants are candidates, not conclusions: `base`
   stays the default, the reviewer measures each live, and a revision is a new
   name rather than an edit to a variant that has held-out numbers.
+- **Gold v3 (the kind cue) and a grouping/kind split in the scorer (G3).** The
+  reviewer's live run showed that the strict identity (element set **and** kind)
+  merges two different questions, so `tools/score_gold.py` now reports, overall
+  and per structure tag, `matched_ignoring_kind` (the element set alone, the same
+  greedy walk as the strict matcher, never below `matched`), `kind_confusions`
+  (matched ignoring kind but not strictly, with
+  `matched_ignoring_kind == matched + kind_confusions` by construction) and
+  `kind_confusion_pairs` (`"<gold kind>><predicted kind>"`, a closed vocabulary
+  `single`/`multi`/`bool`/`text`, never sheet text). Every existing counter and
+  the strict matcher are unchanged. `tools/make_gold.py --gold-version {2,3}`
+  (default `3` for a new set) adds the cue that makes a field's kind readable
+  from the sheet: multi-select and grid fields end `(select all that apply)`, the
+  other single-selects (side-by-side, matrix, no-glyph) end `(choose one)`, the
+  affirm/dissent yes-no rows keep the plain question, text fields become
+  imperatives and typed-value fields noun phrases; each field records its
+  `kind_cue` (a closed vocabulary). v3 changes only the label wording and draws
+  the same words in the same order, so a v3 set has v2's fields, cells and
+  selections and the two score identically on a perfect response; `--gold-version
+  2` reproduces the earlier sets byte for byte (the committed sha256 table stays
+  and a v3 table is added). The generator gained a `kind_swap` mutation (every
+  single read as a multi: grouping intact, only the kind counters move) and
+  `tools/live_probe.py --gold` forwards the three counters, overall and per tag.
+  `tests/test_060_lines_gold.py` now runs the lines contract on both versions.
 
 ### Known issues
 

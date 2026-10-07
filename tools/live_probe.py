@@ -801,7 +801,13 @@ def _gold_output(
 ) -> dict:
     o = score["overall"]
     per_tag = {
-        tag: {"matched": t["matched"], "gold": t["gold_fields"]}
+        tag: {
+            "matched": t["matched"],
+            "gold": t["gold_fields"],
+            "matched_ignoring_kind": t["matched_ignoring_kind"],
+            "kind_confusions": t["kind_confusions"],
+            "kind_confusion_pairs": t["kind_confusion_pairs"],
+        }
         for tag, t in score["per_tag"].items()
     }
     return {
@@ -818,6 +824,9 @@ def _gold_output(
         "gold_fields": o["gold_fields"],
         "predicted_fields": o["predicted_fields"],
         "matched": o["matched"],
+        "matched_ignoring_kind": o["matched_ignoring_kind"],
+        "kind_confusions": o["kind_confusions"],
+        "kind_confusion_pairs": o["kind_confusion_pairs"],
         "precision_num": o["precision_num"],
         "precision_den": o["precision_den"],
         "recall_num": o["recall_num"],

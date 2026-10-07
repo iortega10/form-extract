@@ -593,7 +593,7 @@ def _ref_dict(ref) -> dict:
     }
 
 
-def _fields_for_tab(gold_doc: dict, tab: str, layout) -> list:
+def _fields_for_tab(gold_doc: dict, tab: str, layout, *, swap_single=False) -> list:
     cells = {c["id"]: c for c in gold_doc["cells"]}
     out = []
     for field in gold_doc["fields"]:
@@ -606,10 +606,13 @@ def _fields_for_tab(gold_doc: dict, tab: str, layout) -> list:
             + field["annotation_cells"]
         )
         refs = {cid: _ref_dict(_ref_for(layout, cid)) for cid in cell_ids}
+        control = _CONTROL[field["kind"]]
+        if swap_single and control == "single_select":
+            control = "multi_select"
         out.append(
             {
                 "label": " ".join(cells[c]["text"] for c in field["label_cells"]),
-                "control_type": _CONTROL[field["kind"]],
+                "control_type": control,
                 "options": [
                     {
                         "text": cells[cid]["text"],
@@ -632,7 +635,7 @@ def _fields_for_tab(gold_doc: dict, tab: str, layout) -> list:
     return out
 
 
-def _gold_payloads(gold_dir, gold_doc, *, keep=None) -> list:
+def _gold_payloads(gold_dir, gold_doc, *, keep=None, swap_single=False) -> list:
     """One OpenAI-style response body per tab, built from the real layout."""
     from formextract.ingest import ingest
     from formextract.layout import analyze
@@ -641,7 +644,7 @@ def _gold_payloads(gold_dir, gold_doc, *, keep=None) -> list:
     for tab in gold_doc["tabs"]:
         ing = ingest(gold_dir / f"{tab}.xlsx")
         layout = analyze(ing.elements)
-        fields = _fields_for_tab(gold_doc, tab, layout)
+        fields = _fields_for_tab(gold_doc, tab, layout, swap_single=swap_single)
         if keep is not None:
             fields = [f for i, f in enumerate(fields) if keep(i)]
         bodies.append(_openai_body(json.dumps({"fields": fields}), "stop"))
@@ -739,6 +742,9 @@ def test_gold_mode_scores_a_perfect_server_run(gold_dir, capsys):
     data = _last_line(out)
     assert data["gold_fields"] == len(gold_doc["fields"])
     assert data["matched"] == data["gold_fields"]
+    assert data["matched_ignoring_kind"] == data["gold_fields"]
+    assert data["kind_confusions"] == 0
+    assert data["kind_confusion_pairs"] == {}
     assert data["recall"] == 1.0
     assert data["precision"] == 1.0
     assert data["recall_num"] == data["recall_den"] == data["gold_fields"]
@@ -750,6 +756,33 @@ def test_gold_mode_scores_a_perfect_server_run(gold_dir, capsys):
     assert sum(t["gold"] for t in data["per_tag"].values()) == data["gold_fields"]
     assert state["index"] == len(gold_doc["tabs"])
     assert _wait_idle(before) == before
+
+
+def test_gold_mode_forwards_the_kind_counters(gold_dir, capsys):
+    """The probe forwards the grouping/kind split, overall and per tag."""
+    gold_path, gold_doc = gold_dir
+    # every single-select field read as a multi-select: grouping intact, only the
+    # kind counters move.
+    bodies = _gold_payloads(gold_path, gold_doc, swap_single=True)
+    with _scripted_server(bodies) as (_server, base, _state):
+        code = _run(_gold_args(base, gold_path))
+        out, _err = capsys.readouterr()
+
+    assert code == 0
+    data = _last_line(out)
+    assert data["gold_fields"] == len(gold_doc["fields"])
+    assert data["matched_ignoring_kind"] == data["gold_fields"]
+    assert data["kind_confusions"] > 0
+    assert data["matched"] == data["matched_ignoring_kind"] - data["kind_confusions"]
+    assert data["kind_confusion_pairs"] == {"single>multi": data["kind_confusions"]}
+    # per tag: the split travels too, and sums back to the overall
+    assert data["per_tag"]
+    assert sum(t["matched_ignoring_kind"] for t in data["per_tag"].values()) > 0
+    assert all("kind_confusions" in t for t in data["per_tag"].values())
+    n_single = sum(
+        1 for f in gold_doc["fields"] if f["kind"] == "single"
+    )
+    assert data["kind_confusions"] == n_single
 
 
 def test_gold_mode_mutation_lowers_recall(gold_dir, capsys):
@@ -785,7 +818,7 @@ def test_gold_mode_output_is_numbers_only(gold_dir, capsys):
     assert len(lines) == 1
     data = json.loads(lines[0])
     for key, value in data.items():
-        if key in ("per_tag", "finish_reason_class_counts"):
+        if key in ("per_tag", "finish_reason_class_counts", "kind_confusion_pairs"):
             for inner in value.values():
                 assert isinstance(inner, (int, dict))
             continue

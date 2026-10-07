@@ -68,13 +68,18 @@ from formextract.store import Store  # noqa: E402
 
 
 # --------------------------------------------------------------------------
-# Fixtures: build each gold set once per module, and score the perfect lines once.
+# Fixtures: build each gold set once per module per gold version, and score the
+# perfect lines once. Every version is exercised: the label wording changes in
+# v3, and the lines contract must reach strict 1.0 on both.
 # --------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def dev(tmp_path_factory):
-    base = tmp_path_factory.mktemp("lines-dev")
-    gold, _, _ = make_gold.build_set("dev", make_gold.DEFAULT_SEEDS["dev"], base)
+@pytest.fixture(scope="module", params=make_gold.GOLD_VERSIONS, ids=lambda v: f"v{v}")
+def dev(request, tmp_path_factory):
+    version = request.param
+    base = tmp_path_factory.mktemp(f"lines-dev-v{version}")
+    gold, _, _ = make_gold.build_set(
+        "dev", make_gold.DEFAULT_SEEDS["dev"], base, gold_version=version
+    )
     return gold_lines.GoldLines(base, gold)
 
 
@@ -84,11 +89,12 @@ def dev_scored(dev, tmp_path_factory):
     return dev, gold_lines.score(dev.gold, fields)
 
 
-@pytest.fixture(scope="module")
-def heldout_scored(tmp_path_factory):
-    base = tmp_path_factory.mktemp("lines-heldout")
+@pytest.fixture(scope="module", params=make_gold.GOLD_VERSIONS, ids=lambda v: f"v{v}")
+def heldout_scored(request, tmp_path_factory):
+    version = request.param
+    base = tmp_path_factory.mktemp(f"lines-heldout-v{version}")
     gold, _, _ = make_gold.build_set(
-        "heldout", make_gold.DEFAULT_SEEDS["heldout"], base
+        "heldout", make_gold.DEFAULT_SEEDS["heldout"], base, gold_version=version
     )
     gl = gold_lines.GoldLines(base, gold)
     fields = gl.run(gl.perfect(), tmp_path_factory.mktemp("held-perfect"))
@@ -206,28 +212,31 @@ def test_side_by_side_shared_marker_is_the_expected_ambiguity(dev_scored):
 #: that move are listed; regenerate by rerunning this file.
 LINE_MUTATION_DELTAS = {
     "drop_line": {
-        "predicted_fields": -1, "matched": -1, "missed": 1,
+        "predicted_fields": -1, "matched": -1, "matched_ignoring_kind": -1,
+        "missed": 1,
         "label_ok": -1, "label_total": -1, "options_ok": -1, "options_total": -1,
         "selected_ok": -1, "selected_total": -1,
         "selected_ok_under_convention": -1, "addressed_num": -3,
         "precision_num": -1, "precision_den": -1, "recall_num": -1,
     },
     "wrong_kind": {
-        "matched": -1, "missed": 1, "spurious": 1,
+        "matched": -1, "kind_confusions": 1, "missed": 1, "spurious": 1,
         "label_ok": -1, "label_total": -1, "options_ok": -1, "options_total": -1,
         "selected_ok": -1, "selected_total": -1,
         "selected_ok_under_convention": -1,
         "precision_num": -1, "recall_num": -1,
     },
     "merge_two": {
-        "predicted_fields": -1, "matched": -2, "missed": 1, "merge_count": 1,
+        "predicted_fields": -1, "matched": -2, "matched_ignoring_kind": -2,
+        "missed": 1, "merge_count": 1,
         "label_ok": -2, "label_total": -2, "options_ok": -2, "options_total": -2,
         "selected_ok": -2, "selected_total": -2,
         "selected_ok_under_convention": -2, "addressed_num": -1,
         "precision_num": -2, "precision_den": -2, "recall_num": -2, "recall_den": -1,
     },
     "split_one": {
-        "predicted_fields": 1, "matched": -1, "split_count": 1,
+        "predicted_fields": 1, "matched": -1, "matched_ignoring_kind": -1,
+        "split_count": 1,
         "label_ok": -1, "label_total": -1, "options_ok": -1, "options_total": -1,
         "selected_ok": -1, "selected_total": -1,
         "selected_ok_under_convention": -1,
@@ -236,7 +245,8 @@ LINE_MUTATION_DELTAS = {
     "cut_before_end": {
         # One field per tab is cut: the tail after the last newline is a field
         # line, so the section-3.5 rule drops it.
-        "predicted_fields": -16, "matched": -16, "missed": 16,
+        "predicted_fields": -16, "matched": -16, "matched_ignoring_kind": -16,
+        "missed": 16,
         "label_ok": -16, "label_total": -16, "options_ok": -16, "options_total": -16,
         "selected_ok": -8, "selected_total": -12,
         "selected_ok_under_convention": -7, "selected_ambiguous_expected": -1,
