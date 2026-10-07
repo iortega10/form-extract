@@ -901,6 +901,15 @@ def _section_path(
 class _MarkDecision:
     kind: str  # "auto_select" | "declared_convention" | "ambiguous" | "declining"
     option_text: str | None = None
+    #: Every option text an ``auto_select`` decision selected (the union over a
+    #: field's right-only single-candidate markers, de-duplicated by normalised
+    #: text, in marker order). ``option_text`` stays the first element for the
+    #: consumers that predate the union.
+    option_texts: list[str] = field(default_factory=list)
+    #: Markers that were right-only single-candidate but declined for themselves
+    #: (missing candidate or an empty stripped text). They do not cancel the
+    #: selectable markers; their presence is what forces a review flag.
+    declined_marker_element_ids: list[str] = field(default_factory=list)
     marker_element_id: str | None = None
     candidate_element_ids: list[str] = field(default_factory=list)
     left_candidate_element_ids: list[str] = field(default_factory=list)
@@ -920,6 +929,64 @@ def _match_option(option_text: str, options: list[Option]) -> str | None:
         if candidate and (target.startswith(candidate) or candidate.startswith(target)):
             return o.text
     return None
+
+
+def _between_competing_short_circuit(
+    between: list[MarkerClassification],
+    competing: list[MarkerClassification],
+) -> _MarkDecision | None:
+    """The BETWEEN/COMPETING ambiguity short-circuits, decided before the union."""
+    if between:
+        c = between[0]
+        return _MarkDecision(
+            kind="ambiguous",
+            marker_element_id=c.marker_element_id,
+            candidate_element_ids=c.candidate_element_ids,
+            left_candidate_element_ids=c.left_candidate_element_ids,
+            right_candidate_element_ids=c.right_candidate_element_ids,
+            reason=AMBIGUITY_BETWEEN_OPTIONS,
+        )
+    if competing:
+        c = competing[0]
+        return _MarkDecision(
+            kind="ambiguous",
+            marker_element_id=c.marker_element_id,
+            candidate_element_ids=c.candidate_element_ids,
+            left_candidate_element_ids=c.left_candidate_element_ids,
+            right_candidate_element_ids=c.right_candidate_element_ids,
+            reason=AMBIGUITY_COMPETING_OPTIONS,
+        )
+    return None
+
+
+def _right_only_option_texts(
+    right_only: list[MarkerClassification],
+    elements_by_id: dict[str, Element],
+) -> tuple[list[str], list[str]]:
+    """Union of the options a field's right-only single-candidate markers select.
+
+    Returns ``(option_texts, declined_marker_ids)``. ``option_texts`` is every
+    marker's single candidate text, in marker order, de-duplicated by normalised
+    text, so two markers pointing at one option select it once. A marker whose
+    candidate element is missing or whose stripped text is empty declines for
+    itself: it is recorded in ``declined_marker_ids`` and never cancels the
+    other markers.
+    """
+    option_texts: list[str] = []
+    seen: set[str] = set()
+    declined: list[str] = []
+    for c in right_only:
+        candidate = elements_by_id.get(c.right_candidate_element_ids[0])
+        option_text = strip_marks(candidate.text) if candidate is not None else None
+        if not option_text:
+            declined.append(c.marker_element_id)
+            continue
+        key = normalize_label(option_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        option_texts.append(option_text)
+    return option_texts, declined
 
 
 def _geometric_mark_decision(
@@ -961,45 +1028,29 @@ def _geometric_mark_decision(
         and not c.left_candidate_element_ids
     ]
 
-    if between:
-        c = between[0]
-        return _MarkDecision(
-            kind="ambiguous",
-            marker_element_id=c.marker_element_id,
-            candidate_element_ids=c.candidate_element_ids,
-            left_candidate_element_ids=c.left_candidate_element_ids,
-            right_candidate_element_ids=c.right_candidate_element_ids,
-            reason=AMBIGUITY_BETWEEN_OPTIONS,
-        )
-    if competing:
-        c = competing[0]
-        return _MarkDecision(
-            kind="ambiguous",
-            marker_element_id=c.marker_element_id,
-            candidate_element_ids=c.candidate_element_ids,
-            left_candidate_element_ids=c.left_candidate_element_ids,
-            right_candidate_element_ids=c.right_candidate_element_ids,
-            reason=AMBIGUITY_COMPETING_OPTIONS,
-        )
+    short_circuit = _between_competing_short_circuit(between, competing)
+    if short_circuit is not None:
+        return short_circuit
     if right_only:
-        c = right_only[0]
-        candidate = elements_by_id.get(c.right_candidate_element_ids[0])
-        option_text = strip_marks(candidate.text) if candidate is not None else None
-        if option_text is None:
+        option_texts, declined = _right_only_option_texts(right_only, elements_by_id)
+        first = right_only[0]
+        if not option_texts:
             return _MarkDecision(
                 kind="declining",
-                marker_element_id=c.marker_element_id,
-                candidate_element_ids=c.candidate_element_ids,
-                left_candidate_element_ids=c.left_candidate_element_ids,
-                right_candidate_element_ids=c.right_candidate_element_ids,
+                marker_element_id=first.marker_element_id,
+                candidate_element_ids=first.candidate_element_ids,
+                left_candidate_element_ids=first.left_candidate_element_ids,
+                right_candidate_element_ids=first.right_candidate_element_ids,
             )
         return _MarkDecision(
             kind="auto_select",
-            option_text=option_text,
-            marker_element_id=c.marker_element_id,
-            candidate_element_ids=c.candidate_element_ids,
-            left_candidate_element_ids=c.left_candidate_element_ids,
-            right_candidate_element_ids=c.right_candidate_element_ids,
+            option_text=option_texts[0],
+            option_texts=option_texts,
+            declined_marker_element_ids=declined,
+            marker_element_id=first.marker_element_id,
+            candidate_element_ids=first.candidate_element_ids,
+            left_candidate_element_ids=first.left_candidate_element_ids,
+            right_candidate_element_ids=first.right_candidate_element_ids,
         )
     if classifications:
         c = classifications[0]
@@ -1109,6 +1160,15 @@ def _apply_declared_convention(
     )
 
 
+def _selections_disagree(
+    model_selected: list[str], geometric_selected: list[str]
+) -> bool:
+    """Whether the model's ``selected`` flags differ from the geometric set."""
+    return {normalize_label(t) for t in model_selected} != {
+        normalize_label(t) for t in geometric_selected
+    }
+
+
 def drafts_to_fields(
     drafts: list[BindingDraft],
     *,
@@ -1207,8 +1267,21 @@ def drafts_to_fields(
                 )
 
             if decision is not None and decision.kind in ("auto_select", "declared_convention"):
-                matched = _match_option(decision.option_text or "", draft.options)
-                if matched is None:
+                option_texts = decision.option_texts or (
+                    [decision.option_text] if decision.option_text else []
+                )
+                matched_set: list[str] = []
+                matched_keys: set[str] = set()
+                for text in option_texts:
+                    matched = _match_option(text, draft.options)
+                    if matched is None:
+                        continue
+                    key = normalize_label(matched)
+                    if key in matched_keys:
+                        continue
+                    matched_keys.add(key)
+                    matched_set.append(matched)
+                if not matched_set:
                     decision = _MarkDecision(
                         kind="declining",
                         marker_element_id=decision.marker_element_id,
@@ -1227,7 +1300,7 @@ def drafts_to_fields(
                     options = [
                         Option(
                             text=o.text,
-                            selected=(True if o.text == matched else None),
+                            selected=(True if o.text in matched_set else None),
                             raw_span=o.raw_span,
                             bbox=o.bbox,
                         )
@@ -1237,7 +1310,7 @@ def drafts_to_fields(
                     options = [
                         Option(
                             text=o.text,
-                            selected=(o.text == matched),
+                            selected=(o.text in matched_set),
                             raw_span=o.raw_span,
                             bbox=o.bbox,
                         )
@@ -1294,9 +1367,12 @@ def drafts_to_fields(
                 provenance.heuristic_agreement.append(GEOMETRIC_SELECTION_TOKEN)
                 model_selected = [o.text for o in draft.options if o.selected]
                 geometric_selected = [o.text for o in options if o.selected]
-                if model_selected and {
-                    normalize_label(t) for t in model_selected
-                } != {normalize_label(t) for t in geometric_selected}:
+                if model_selected and _selections_disagree(
+                    model_selected, geometric_selected
+                ):
+                    provenance.review_flag = True
+                    provenance.review_reason = ReviewReason.AMBIGUOUS_MARK
+                if decision.declined_marker_element_ids:
                     provenance.review_flag = True
                     provenance.review_reason = ReviewReason.AMBIGUOUS_MARK
             if decision is not None and decision.kind == "declared_convention":

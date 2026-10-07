@@ -163,6 +163,26 @@ single schema version bump per output-changing release.
 
 ### Fixed
 
+- **A vertically stacked multi-select keeps every marked option.** The geometric
+  mark decision applied only the *first* right-only marker's candidate
+  (`_geometric_mark_decision` returned `auto_select` for `right_only[0]`) and
+  `drafts_to_fields` then set exactly one option's `selected`, overwriting the
+  model's other selections — and flagged `AMBIGUOUS_MARK` only when the model had
+  also set the others. A dense row never hit it (interior marks classify BETWEEN,
+  the first sees several candidates: COMPETING), but a vertically stacked
+  multi-select groups one `X Option` per band, so every marker is RIGHT_ONLY with
+  a single candidate. The decision now carries the **union** of the field's
+  right-only single-candidate markers (`_MarkDecision.option_texts`),
+  de-duplicated by normalised option text, and `drafts_to_fields` marks every
+  matched option (and the model cross-check compares the whole set). A marker
+  whose candidate is missing or whose stripped text is empty declines for itself:
+  it is recorded (`_MarkDecision.declined_marker_element_ids`), never cancels a
+  selectable marker, and forces an `AMBIGUOUS_MARK` review flag; the BETWEEN and
+  COMPETING short-circuits and declared conventions are unchanged. A field with
+  exactly one right-only marker is byte-identical to before. `PROMPT_VERSION`,
+  `PIPELINE_VERSION` and `SCHEMA_VERSION` do not move — this changes record
+  *values* for stacked multi-selects only, so cached instances of such forms are
+  stale until `PIPELINE_VERSION` moves with L1b.
 - **`Field.tab` is populated for a region-less field.** `drafts_to_fields` set
   `tab` only when the model's `region_id` resolved, so a field whose region did
   not resolve carried `tab=None` — and `_matching_conventions` skips its tab
