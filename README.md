@@ -108,8 +108,14 @@ from formextract.store import Store
 
 class MyClient:
     def complete(self, prompt, *, model, params):
-        text = call_my_llm(prompt)  # your provider call
-        return LLMResponse(text=text, model=model, params=params, tokens=123)
+        text, finish_reason = call_my_llm(prompt)  # your provider call
+        return LLMResponse(
+            text=text,
+            model=model,
+            params=params,
+            tokens=123,
+            finish_reason=finish_reason,  # OpenAI "length", Gemini "MAX_TOKENS", ...
+        )
 
 
 pipeline = Pipeline(
@@ -160,7 +166,10 @@ archived call carries `latency_ms`. Raise on a transport failure (never retry
 internally), and raise `NonRetryable` — or an exception carrying a 4xx
 `status_code`/`code` — for a request that can never succeed: a 4xx costs exactly
 one call. Do not swallow the provider's error text: it ends up in the record's
-`errors` as `transport failed: {exc}`.
+`errors` as `transport failed: {exc}`. Set `LLMResponse.finish_reason` to the
+provider's stop reason (OpenAI `length`, Anthropic `max_tokens`, Gemini
+`MAX_TOKENS`, ...): the lines output contract reads it to tell a length cut from
+a clean stop. It is optional and defaults to `None` (`unknown`).
 
 **Levers, most effective first.**
 

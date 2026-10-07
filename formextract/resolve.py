@@ -73,6 +73,12 @@ class LLMResponse:
     params: dict[str, Any]
     tokens: int | None = None
     latency_ms: int | None = None
+    #: The provider's stop reason for this response (OpenAI ``length``,
+    #: Anthropic ``max_tokens``, Gemini ``MAX_TOKENS``, ...). Defaulted and
+    #: source-compatible: a client that does not fill it leaves it ``None``,
+    #: which the lines contract reads as ``unknown``. Normalise it with
+    #: ``lines.normalize_finish_reason``.
+    finish_reason: str | None = None
 
 
 class NonRetryable(Exception):
@@ -152,7 +158,10 @@ class LLMClient(Protocol):
     carrying a 4xx ``status_code``/``code``) for a request that can never
     succeed: the attempt loop then makes exactly one call for it. Do not retry
     internally, and do not wrap the provider's message away - it ends up in the
-    record's ``errors`` as ``transport failed: {exc}``.
+    record's ``errors`` as ``transport failed: {exc}``. Fill
+    ``LLMResponse.finish_reason`` with the provider's stop reason (it is
+    optional and defaults to ``None``): the lines output contract reads it to
+    tell a length cut from a clean stop.
     """
 
     def complete(self, prompt: str, *, model: str, params: dict[str, Any]) -> LLMResponse: ...

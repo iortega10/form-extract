@@ -99,6 +99,42 @@ single schema version bump per output-changing release.
   keys. `--record-out PATH` writes the combined record dump only when asked, and
   a directory whose tabs no longer match the manifest sha256 is refused (exit 2).
   Key safety is unchanged.
+- **Line-contract parser (`formextract/lines.py`) and
+  `LLMResponse.finish_reason`.** The response text of the planned 0.6.0 `lines`
+  output contract now has a pure, total parser (`parse_lines`) that turns it into
+  line records (`kind L= O= A= N=`, refs `row.seg`, join `+`, span `-`, quoted
+  literals) and never raises. It is lenient (case-insensitive kinds and keys,
+  three-letter kinds, `:` for `=`, an optional `r` before a row, whitespace around
+  commas), degrades an unknown kind to a review-flagged field, and records an
+  unparsable line between records as `line N: ...`, while text before the first
+  record or after `end` is counted `noise_lines`. A ref that cannot exist (a
+  cross-row span, a malformed ref) becomes a sentinel ref for the resolver to
+  reject, never a line error. The section-3.5 truncation rule is applied: a
+  recognised-cut finish reason, or an `unknown` reason with no `end`, marks the
+  parse `truncated` and drops the trailing line, with the error
+  `response truncated after N lines`. `LLMResponse` gains an optional, defaulted
+  `finish_reason` the caller fills (normalised by `lines.normalize_finish_reason`);
+  the probe's client now sets it. The default output contract is still `json`;
+  this turn touches no resolver.
+- **Line-contract parser, totality and bounds (L1a-fix).** The parser was
+  hardened against inputs a model can emit: every number is validated *before*
+  conversion (ASCII digits only, at most `MAX_DIGITS` (9) of them - a longer or
+  non-ASCII run, Arabic-Indic and fullwidth included, is a sentinel, never an
+  `int()` and never a `ValueError`); `_digits_to_int` is the module's only `int()`
+  call and `re`'s `\d` is not used. A span wider than `MAX_SPAN_WIDTH` (10,000),
+  reversed or cross-row is a sentinel and stays unexpanded. A literal is allowed
+  under `O`/`N` only - under `L`/`A` it is a sentinel item - and a record is
+  `review=True` when it holds a sentinel, when a duplicate `O` occurrence of an
+  `L` element is dropped, or when its kind is unknown, so the resolver can flag
+  the field without re-scanning. `LineStats` gains `lines_total`, `error_lines`,
+  `refs_total`, `refs_bad`, `truncated`, `dropped_tail`, `unknown_kind`,
+  `no_label` and `empty_response` beside `records`/`noise_lines`/
+  `literal_items`/`end_seen`/`end_missing`. An empty or noise-only response is no
+  longer reported as a truncation - nothing was cut - but as one `response empty`
+  error with `stats.empty_response` (the pipeline still marks the chunk PARTIAL).
+  The trailing segment is now decided *before* it is parsed, so a dropped tail
+  costs one step, not one per item (a 10 MB single line: 9.1 s fully parsed,
+  0.011 s when dropped), asserted through the repo's `steps` counter.
 
 ### Changed
 

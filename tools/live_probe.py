@@ -697,6 +697,7 @@ class _ProviderClient:
             params=params,
             tokens=call["output_tokens"],
             latency_ms=None,
+            finish_reason=call["finish_class"],
         )
 
 
