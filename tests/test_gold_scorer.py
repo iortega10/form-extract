@@ -167,9 +167,9 @@ OLD_TAB_SHA256 = {
 }
 
 #: sha256 of every tab of the gold v3 set (the generator's default). v3 changes
-#: only the label wording, so the two tabs whose structures all keep the plain
-#: question (Dev01 yes/no rows) are byte-identical to v2 and the rest are not.
-#: These rows are the v3 counterpart of OLD_TAB_SHA256 and pin the generated
+#: only the label wording, so any tab whose structures all keep the plain
+#: question (Dev01 yes/no rows) is byte-identical to v2 and every other tab is
+#: not. These rows are the v3 counterpart of OLD_TAB_SHA256 and pin the generated
 #: bytes the same way.
 V3_TAB_SHA256 = {
     "dev": {
@@ -179,25 +179,25 @@ V3_TAB_SHA256 = {
         "Dev04": "554d9124d29707bf5910c51682a6361ab368217ce2e6d45d9796e7a06c3eccbc",
         "Dev05": "25b70dbd5507134040c8e29e1f7cb40b2b653cfc293c2d21b283b84b62e2f842",
         "Dev06": "deef816dcd986e998e70141f25aff0c57159933512e59d1228bc53c470866563",
-        "Dev07": "6edc2014eefb763c8fe32096015e8a300227a0c27ff15e558332eb8778f3ebd1",
+        "Dev07": "26b5522b082b6dd2ffb60748b518bdd2bb6d7c47eb008761131c3eccabcd44be",
         "Dev08": "470f2fcd20d6a124248ce6a9309d595478f6e1c2fbb463924e24f099bf6e8b3b",
         "Dev09": "6555763fac0a129ecb9e0db24954cc9d7e7ca037e557425960c80561f5abd8ed",
         "Dev10": "233e1085bd7026abbc9d98d891ead8eabcbe26c4e4a694fd8978a1a03df93f44",
         "Dev11": "bce355559bdd1a2715fcfddcb21837d281ffe0a44f1fe07c4e0f27a09f37ff39",
         "Dev12": "b2b2a4faae1b1dce44d63df187e20287425f22554f9d79e2436f220c8110ca3f",
         "Dev13": "6a63069fd9e1a5c457b16016e776baeefcef6c9c0fb2ddf07b9befd0473288cd",
-        "Dev14": "54fd56bf543952fc3fa4673542ce59a625869bd677f4c408c91e6b1d62063868",
+        "Dev14": "b8f7bb1e095327bf181d2cdb7449b7d894d096ea15447183611fc04247e6d7d0",
         "Dev15": "231297fbacee9c775c32fa539d971ec4788ac28624fd733a41b64fb155c01b67",
         "Dev16": "dae6a55c166c1215c42fcd034422edcfc3b7b23aa4c5d09d32fccc5d806cbc6a",
     },
     "heldout": {
         "Hold01": "69d51aefc118e4b12b4b04ad32220f6baeee542b996abebac6675b8f03e2401a",
         "Hold02": "d86ad118394207274c6b883a04a4c95cf49f3e1126d4d05887a40684b9abadb4",
-        "Hold03": "cbc6571591e2292da5ba3cd59fb909fa2564a69fc5137e704d22156cdc8cbc16",
+        "Hold03": "b2ac4e01ee85ed1e9e4e10d7886f28c9bd9c7c063ba84582fc266c729ee01872",
         "Hold04": "10dca1d00f99facedfdbe7183652ec6ed6545fa1a113f3beb71e5c4056b18ec3",
         "Hold05": "2b5f1bfa115f91cf113ab99e976dcbe84fee7350e7be308f701f5778d2116cfd",
         "Hold06": "2bc9ccd7942b0ced59776eec68f0827110dad0fa74d3ec38d7ec7ab5aa37fa3e",
-        "Hold07": "d30df1bac69a4581f6d03e139c158daae3e5d3af0126a2110809dc6d3f12642f",
+        "Hold07": "78538ab01f26f5871d82f6f405c6e9439f5b6afdd2ed0bee4c72853c61c9abc2",
         "Hold08": "b0ad4c4fdda65d8989709f3557432b2613dd1c593a116804e0e9055178836678",
     },
 }
@@ -380,11 +380,18 @@ def test_v3_tabs_have_a_committed_sha256_table(gold_v3):
         assert set(sha) == set(gold_v3[key]["tabs"])
         for tab, expected in V3_TAB_SHA256[set_name].items():
             assert sha[tab] == expected, (tab, sha[tab], expected)
-    # v3 changes only the wording: the all-plain-question tabs keep v2's bytes,
-    # so the table is not merely the v2 table again.
+    # v3 changes only the wording: only the tab whose structures all keep the
+    # plain question (Dev01, yes/no rows) keeps v2's bytes, so the table is not
+    # merely the v2 table again.
     assert V3_TAB_SHA256["dev"]["Dev01"] == OLD_TAB_SHA256["dev"]["Dev01"]
     assert V3_TAB_SHA256["dev"]["Dev02"] != OLD_TAB_SHA256["dev"]["Dev02"]
     assert V3_TAB_SHA256["heldout"]["Hold01"] != OLD_TAB_SHA256["heldout"]["Hold01"]
+    same_as_v2 = {
+        tab
+        for tab, sha in V3_TAB_SHA256["dev"].items()
+        if OLD_TAB_SHA256["dev"].get(tab) == sha
+    }
+    assert same_as_v2 == {"Dev01"}
 
 
 def test_v3_field_counts_per_tag_equal_v2(gold, gold_v3):
@@ -727,7 +734,7 @@ def test_v3_cue_rule_per_tag_from_the_gold(gold_v3):
             assert "(select all that apply)" in label, (tag, label)
         elif cue == "choose_one":
             assert "(choose one)" in label, (tag, label)
-        elif cue in ("imperative", "noun_phrase"):
+        elif cue == "imperative":
             assert not label.rstrip().endswith("?"), (tag, label)
         else:
             assert label.rstrip().endswith("?"), (tag, label)
@@ -741,18 +748,60 @@ def test_v3_cue_rule_per_tag_from_the_gold(gold_v3):
             for f in doc["fields"] if tag in f["tags"]
         ]
         assert labels and all("(select all that apply)" in t for t in labels), tag
-    for tag in ("text_field", "typed_value"):
+    for tag in ("text_field", "merged_tall", "label_two_rows", "label_two_cells"):
         labels = [
             " ".join(cells[c]["text"] for c in f["label_cells"])
             for f in doc["fields"] if tag in f["tags"]
         ]
         assert labels and all(not t.rstrip().endswith("?") for t in labels), tag
+    # the typed-value rows are the one ``bool`` structure and read as a question
+    for tag in ("typed_value",):
+        labels = [
+            " ".join(cells[c]["text"] for c in f["label_cells"])
+            for f in doc["fields"] if tag in f["tags"]
+        ]
+        assert labels and all(t.rstrip().endswith("?") for t in labels), tag
+
+
+def test_v3_bool_labels_are_questions_and_text_labels_are_not(gold_v3):
+    """Every ``bool`` field reads as the plain question; no ``text`` label does.
+
+    The gold kinds are the contract the models are scored against, so the label
+    must not contradict the kind: a noun phrase under a typed answer reads as a
+    text field, which is why the typed-value rows keep the v2 question wording.
+    Both the label's ``?`` and the recorded ``kind_cue`` agree with the kind.
+    """
+    seen: set[str] = set()
+    for key in ("dev_gold", "held_gold"):
+        doc = gold_v3[key]
+        cells = {c["id"]: c for c in doc["cells"]}
+        for field in doc["fields"]:
+            if field["kind"] not in ("bool", "text"):
+                continue
+            label = " ".join(cells[c]["text"] for c in field["label_cells"]).rstrip()
+            if field["kind"] == "bool":
+                assert label.endswith("?"), (key, field["field_id_gold"], label)
+                assert field["kind_cue"] == "plain_question", (
+                    key, field["field_id_gold"], field["kind_cue"],
+                )
+            else:
+                assert not label.endswith("?"), (key, field["field_id_gold"], label)
+                assert field["kind_cue"] != "plain_question", (
+                    key, field["field_id_gold"], field["kind_cue"],
+                )
+            seen.add(field["kind"])
+    assert seen == {"bool", "text"}  # anti-vacuity: both kinds are exercised
 
 
 def test_v3_kind_cue_vocabulary_is_closed(gold_v3):
     cues = {f["kind_cue"] for f in gold_v3["dev_gold"]["fields"]}
     assert cues <= set(make_gold.KIND_CUES)
-    assert cues == set(make_gold.KIND_CUES)  # every cue is exercised at least once
+    # every cue a structure tag maps to is exercised at least once ...
+    assert cues == set(make_gold.TAG_KIND_CUE.values())
+    # ... and ``noun_phrase`` is declared but deliberately unassigned: a noun
+    # phrase under a typed answer reads as a text field
+    assert "noun_phrase" in make_gold.KIND_CUES
+    assert "noun_phrase" not in set(make_gold.TAG_KIND_CUE.values())
 
 
 # --------------------------------------------------------------------------

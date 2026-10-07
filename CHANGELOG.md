@@ -227,6 +227,16 @@ single schema version bump per output-changing release.
   single read as a multi: grouping intact, only the kind counters move) and
   `tools/live_probe.py --gold` forwards the three counters, overall and per tag.
   `tests/test_060_lines_gold.py` now runs the lines contract on both versions.
+- **Gold v3 fix (G3b, 2026-10-07): the typed-value labels are questions again.**
+  The typed-value fields (gold kind `bool`, answer cell a status word) took the
+  noun-phrase cue, and a noun phrase under a typed answer reads as a text field,
+  so the generator itself provoked a `bool` > `text` confusion on every model.
+  `TAG_KIND_CUE["typed_value"]` is now `plain_question`, which is verbatim v2's
+  wording — the text fields keep the imperative cue and nothing else moves.
+  `noun_phrase` stays in the closed cue vocabulary, unmapped. v2 is byte-identical
+  (the committed `OLD_TAB_SHA256` table is untouched), v3 keeps v2's per-tag field
+  counts, and the four `V3_TAB_SHA256` rows whose tabs hold typed-value rows
+  (Dev07, Dev14, Hold03, Hold07) are refreshed.
 
 ### Known issues
 

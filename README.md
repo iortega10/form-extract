@@ -389,6 +389,12 @@ and selections as its v2 twin — only the label wording changes — so the two
 versions score identically on a perfect response and differ only in what a model
 can read off the sheet.
 
+*2026-10-07 (G3b)* — the typed-value fields (gold kind `bool`) keep the plain
+question of v2 rather than the noun phrase described above: a noun phrase under a
+typed answer reads as a text field, so the generator would manufacture the kind
+confusion the cue exists to avoid. `noun_phrase` stays in the declared vocabulary
+but no structure tag maps to it.
+
 Every tab records the checkbox convention its generator used, in a
 `checkbox_conventions` list written in exactly the shape
 `PipelineConfig.checkbox_conventions` takes (here: one selector per tab,

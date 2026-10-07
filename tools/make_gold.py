@@ -94,8 +94,11 @@ KIND_CUES = (
 #: options already read as a yes/no, so no cue is needed and any suffix would
 #: only blur them. Every other multi field takes the select-all cue, every other
 #: single field the choose-one cue, and the text fields are rewritten away from a
-#: question (imperative) while the typed-value (a ``bool``) uses a noun phrase, so
-#: a value under an imperative and a value under a noun phrase stay apart.
+#: question (imperative). The typed-value rows are a ``bool`` under a status word
+#: and keep the plain question too: a noun phrase there reads as a text field, so
+#: the sheet's own wording would provoke the very kind confusion the vocabulary
+#: exists to avoid. ``noun_phrase`` stays in `KIND_CUES` but is not assigned to a
+#: tag for that reason.
 TAG_KIND_CUE = {
     "yes_no_row": "plain_question",
     "gutter_column": "plain_question",
@@ -110,7 +113,7 @@ TAG_KIND_CUE = {
     "label_two_rows": "imperative",
     "label_two_cells": "imperative",
     "merged_tall": "imperative",
-    "typed_value": "noun_phrase",
+    "typed_value": "plain_question",
 }
 
 #: The fixed words the cue templates add to a label (never a pool word). They are
