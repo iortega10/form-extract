@@ -34,7 +34,7 @@ from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, PatternFill
 
-GOLD_VERSION = 1
+GOLD_VERSION = 2
 
 #: The clock is pinned so regeneration is byte-identical; the zip is repacked
 #: with a fixed date_time so openpyxl's mtime never leaks into the bytes.
@@ -59,6 +59,10 @@ FIELD_TAGS = (
     "merged_tall",
     "gutter_column",
     "non_answer_column",
+    # Not a structure: a cross-cutting tag on every field of a mixed tab, so the
+    # mixed set reports as a whole and each structure tag includes its mixed
+    # instances.
+    "mixed_tab",
 )
 DISPOSITION_TAGS = ("header_row", "note_row", "skip_row")
 #: Gold dispositions are stored by their line kind; the tags above name them.
@@ -593,6 +597,418 @@ def _tab_gutter_and_non_answer(s: Sheet) -> None:
     s.dispose(row, 1, s.words.skip(), "skip")
 
 
+# --------------------------------------------------------------------------
+# Mixed tabs: blocks of the existing structure kinds, shuffled per tab, with
+# hdr/note/skip separators. Every field also carries the `mixed_tab` tag, so a
+# structure tag's score includes its mixed instances and `mixed_tab` reports the
+# mixed set as a whole.
+# --------------------------------------------------------------------------
+
+#: Appended after the homogeneous tabs, fed by a separate RNG stream
+#: (``_MIXED_SEED_BASE``) so adding them cannot perturb the homogeneous tabs.
+MIXED_DEV_TABS = ("Dev13", "Dev14", "Dev15", "Dev16")
+MIXED_HELD_TABS = ("Hold07", "Hold08")
+MIXED_TABS = MIXED_DEV_TABS + MIXED_HELD_TABS
+_MIXED_SEED_BASE = 500
+_MIXED_TAG = "mixed_tab"
+
+#: The palette: kind -> instances written. Every mixed tab always gets a 12-row
+#: yes/no run and a 50-option grid (the two long-form shapes) plus the three
+#: multi-row kinds (so a tab lands in the 60-100 row band), and a seeded four of
+#: the rest, so every mixed tab has >= 9 distinct structure kinds.
+_MIXED_COUNTS = {
+    "yes_no_row": 12,
+    "grid_50": 1,
+    "stacked_multi": 4,
+    "label_two_rows": 3,
+    "merged_tall": 3,
+    "dense_multi": 1,
+    "label_two_cells": 1,
+    "text_field": 1,
+    "typed_value": 1,
+    "no_glyph_answer": 1,
+    "matrix": 1,
+    "gutter_column": 1,
+    "non_answer_column": 1,
+    "side_by_side": 1,
+    "ambiguous": 1,
+}
+_MIXED_ALWAYS = (
+    "yes_no_row",
+    "grid_50",
+    "stacked_multi",
+    "label_two_rows",
+    "merged_tall",
+    "ambiguous",
+)
+_MIXED_OPTIONAL = (
+    "dense_multi",
+    "label_two_cells",
+    "text_field",
+    "typed_value",
+    "no_glyph_answer",
+    "matrix",
+    "gutter_column",
+    "non_answer_column",
+    "side_by_side",
+)
+_MIXED_OPTIONAL_PICK = 4
+
+
+def _blk_header(s: Sheet, row: int) -> int:
+    s.dispose(row, 1, s.words.header(), "hdr")
+    return row + 1
+
+
+def _blk_note(s: Sheet, row: int) -> int:
+    s.dispose(row, 1, s.words.note(), "note")
+    return row + 1
+
+
+def _blk_skip(s: Sheet, row: int) -> int:
+    s.dispose(row, 1, s.words.skip(), "skip")
+    return row + 1
+
+
+def _blk_yes_no(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        yn = s.words.yesno()
+        sel = s.words.rng.randint(0, 1)
+        option_ids, selected = _put_options(
+            s, row, 3, [(yn[0], sel == 0), (yn[1], sel == 1)]
+        )
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["yes_no_row", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_dense(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        opts = [(t, s.words.rng.random() < 0.4) for t in s.words.options(DENSE_OPTIONS)]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["dense_multi", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_stacked(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        row += 1
+        option_ids: list[str] = []
+        selected: list[str] = []
+        for text in s.words.options(STACKED_OPTIONS):
+            is_sel = s.words.rng.random() < 0.4
+            if is_sel:
+                s.put(row, 3, MARKER, "marker")
+            oid = s.put(row, 4, text, "option")
+            option_ids.append(oid)
+            if is_sel:
+                selected.append(oid)
+            row += 1
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["stacked_multi", _MIXED_TAG],
+        )
+    return row
+
+
+def _blk_side_by_side(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        for label_col, opt_col in ((1, 3), (8, 10)):
+            lid = s.put(row, label_col, s.words.label(), "label")
+            texts = s.words.options(2)
+            sel = s.words.rng.randint(0, 1)
+            option_ids, selected = _put_options(
+                s, row, opt_col, [(texts[0], sel == 0), (texts[1], sel == 1)]
+            )
+            s.field(
+                kind="single",
+                label_cells=[lid],
+                option_cells=option_ids,
+                selected_option_cells=selected,
+                tags=["side_by_side", _MIXED_TAG],
+            )
+        row += 1
+    return row
+
+
+def _blk_label_two_rows(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        l1 = s.put(row, 1, s.words.label(), "label")
+        l2 = s.put(row + 1, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 3, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[l1, l2],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["label_two_rows", _MIXED_TAG],
+        )
+        row += 2
+    return row
+
+
+def _blk_label_two_cells(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        l1 = s.put(row, 1, s.words.label(), "label")
+        l2 = s.put(row, 2, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 4, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[l1, l2],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["label_two_cells", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_text(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 3, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[lid],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["text_field", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_typed(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        ans = s.put(row, 3, s.words.typed_value(), "answer")
+        s.field(
+            kind="bool",
+            label_cells=[lid],
+            answer_cells=[ans],
+            tags=["typed_value", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_no_glyph(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        texts = s.words.options(3)
+        sel = s.words.rng.randint(0, 2)
+        option_ids: list[str] = []
+        styled: str | None = None
+        col = 3
+        for i, text in enumerate(texts):
+            if i == sel:
+                oid = s.put(row, col, text, "option", bold=True, fill=True)
+                styled = oid
+            else:
+                oid = s.put(row, col, text, "option")
+            option_ids.append(oid)
+            col += 1
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=[styled] if styled else [],
+            tags=["no_glyph_answer", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_grid(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        row += 1
+        texts = s.words.options(GRID_ROWS * GRID_COLS)
+        option_ids: list[str] = []
+        for i in range(GRID_ROWS):
+            for j in range(GRID_COLS):
+                option_ids.append(
+                    s.put(row + i, 2 + j, texts[i * GRID_COLS + j], "option")
+                )
+        selected = [oid for k, oid in enumerate(option_ids) if k % 7 == 0]
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["grid_50", _MIXED_TAG],
+        )
+        row += GRID_ROWS
+    return row
+
+
+def _blk_matrix(s: Sheet, row: int, n: int) -> int:
+    header = s.put(row, 2, s.words.header(), "option")
+    row += 1
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        ans = s.put(row, 2, s.words.typed_value(), "answer")
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=[header],
+            answer_cells=[ans],
+            tags=["matrix", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_merged(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        s.ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=2)
+        lid = s.put(row, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 4, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[lid],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["merged_tall", _MIXED_TAG],
+        )
+        row += 2
+    return row
+
+
+def _blk_gutter(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 2, s.words.label(), "label")
+        yn = s.words.yesno()
+        sel = s.words.rng.randint(0, 1)
+        option_ids, selected = _put_options(
+            s, row, 4, [(yn[0], sel == 0), (yn[1], sel == 1)]
+        )
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["gutter_column", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_non_answer(s: Sheet, row: int, n: int) -> int:
+    for _ in range(n):
+        lid = s.put(row, 1, s.words.label(), "label")
+        opts = [(t, s.words.rng.random() < 0.5) for t in s.words.options(2)]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        ann = s.put(row, 12, s.words.annotation(), "annotation")
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            annotation_cells=[ann],
+            tags=["non_answer_column", _MIXED_TAG],
+        )
+        row += 1
+    return row
+
+
+def _blk_ambiguous(s: Sheet, row: int) -> int:
+    """Two yes/no-shaped fields sharing one competing between-marker.
+
+    The single marker at column 6 is between the left field's option and the
+    right field's option, so the resolution is genuinely ambiguous *by design*:
+    the declared `mark_precedes_option` convention cannot decide it. The gold
+    marks both fields `expected_ambiguous` so the by-design outcome does not read
+    as a regression (the same shape as the side-by-side tab's shared-marker row).
+    """
+    yn = s.words.yesno()
+    left_label = s.put(row, 1, s.words.label(), "label")
+    s.put(row, 3, MARKER, "marker")
+    left_option = s.put(row, 4, yn[0], "option")
+    s.put(row, 6, MARKER, "marker")
+    right_label = s.put(row, 8, s.words.label(), "label")
+    right_option = s.put(row, 10, yn[1], "option")
+    s.field(
+        kind="single",
+        label_cells=[left_label],
+        option_cells=[left_option],
+        selected_option_cells=[left_option],
+        tags=["yes_no_row", _MIXED_TAG],
+        expected_ambiguous=True,
+    )
+    s.field(
+        kind="single",
+        label_cells=[right_label],
+        option_cells=[right_option],
+        tags=["yes_no_row", _MIXED_TAG],
+        expected_ambiguous=True,
+    )
+    return row + 1
+
+
+def _mixed_block_builders(s: Sheet) -> dict:
+    c = _MIXED_COUNTS
+    return {
+        "yes_no_row": lambda r: _blk_yes_no(s, r, c["yes_no_row"]),
+        "grid_50": lambda r: _blk_grid(s, r, c["grid_50"]),
+        "stacked_multi": lambda r: _blk_stacked(s, r, c["stacked_multi"]),
+        "label_two_rows": lambda r: _blk_label_two_rows(s, r, c["label_two_rows"]),
+        "merged_tall": lambda r: _blk_merged(s, r, c["merged_tall"]),
+        "dense_multi": lambda r: _blk_dense(s, r, c["dense_multi"]),
+        "label_two_cells": lambda r: _blk_label_two_cells(s, r, c["label_two_cells"]),
+        "text_field": lambda r: _blk_text(s, r, c["text_field"]),
+        "typed_value": lambda r: _blk_typed(s, r, c["typed_value"]),
+        "no_glyph_answer": lambda r: _blk_no_glyph(s, r, c["no_glyph_answer"]),
+        "matrix": lambda r: _blk_matrix(s, r, c["matrix"]),
+        "gutter_column": lambda r: _blk_gutter(s, r, c["gutter_column"]),
+        "non_answer_column": lambda r: _blk_non_answer(s, r, c["non_answer_column"]),
+        "side_by_side": lambda r: _blk_side_by_side(s, r, c["side_by_side"]),
+        "ambiguous": lambda r: _blk_ambiguous(s, r),
+    }
+
+
+def _build_mixed(s: Sheet) -> None:
+    builders = _mixed_block_builders(s)
+    kinds = list(_MIXED_ALWAYS) + s.words.rng.sample(
+        _MIXED_OPTIONAL, _MIXED_OPTIONAL_PICK
+    )
+    s.words.rng.shuffle(kinds)
+    separators = (_blk_header, _blk_note, _blk_skip)
+    row = _blk_header(s, 1)
+    for i, kind in enumerate(kinds):
+        row = builders[kind](row)
+        row = separators[i % len(separators)](s, row)
+    row = _blk_note(s, row)
+    _blk_skip(s, row)
+
+
+def _tab_mixed(s: Sheet) -> None:
+    _build_mixed(s)
+
+
 DEV_TABS = (
     ("Dev01", _tab_yes_no),
     ("Dev02", _tab_dense),
@@ -606,6 +1022,10 @@ DEV_TABS = (
     ("Dev10", _tab_grid),
     ("Dev11", _tab_matrix_and_merged),
     ("Dev12", _tab_gutter_and_non_answer),
+    ("Dev13", _tab_mixed),
+    ("Dev14", _tab_mixed),
+    ("Dev15", _tab_mixed),
+    ("Dev16", _tab_mixed),
 )
 
 
@@ -874,6 +1294,8 @@ HELDOUT_TABS = (
     ("Hold04", _tab_hold_no_glyph_non_answer),
     ("Hold05", _tab_hold_grid_matrix),
     ("Hold06", _tab_hold_merged_gutter),
+    ("Hold07", _tab_mixed),
+    ("Hold08", _tab_mixed),
 )
 
 #: A different base for each tab so text does not repeat, still seed-driven.
@@ -927,12 +1349,21 @@ def build_set(set_name: str, seed: int, out_dir: Path):
     dispositions: list[dict] = []
     sheets: list[tuple[str, Sheet]] = []
     per_tab_sha: dict[str, str] = {}
+    mixed_seen = 0
 
     for index, (tab_name, builder) in enumerate(tabs):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = tab_name
-        sheet = Sheet(ws, Words(pool, _sheet_rng(seed, index)))
+        # The mixed tabs draw from their own stream, appended after the
+        # homogeneous tabs' index-keyed streams, so adding mixed tabs cannot
+        # perturb a homogeneous tab's bytes.
+        if tab_name in MIXED_TABS:
+            rng = _sheet_rng(seed, _MIXED_SEED_BASE + mixed_seen)
+            mixed_seen += 1
+        else:
+            rng = _sheet_rng(seed, index)
+        sheet = Sheet(ws, Words(pool, rng))
         builder(sheet)
         payload = _write_workbook(wb, out_dir / f"{tab_name}.xlsx")
         wb.close()
@@ -942,11 +1373,24 @@ def build_set(set_name: str, seed: int, out_dir: Path):
         dispositions.extend(sheet.dispositions)
         sheets.append((tab_name, sheet))
 
+    # Every tab is generated with the same documented convention: the mark
+    # precedes its option label. Written exactly in the shape
+    # PipelineConfig.checkbox_conventions takes, one selector per tab, so a
+    # harness can declare it without translation.
+    checkbox_conventions = [
+        {
+            "tab": name,
+            "anchor_pattern": None,
+            "convention": "mark_precedes_option",
+        }
+        for name, _ in tabs
+    ]
     gold = {
         "gold_version": GOLD_VERSION,
         "set": set_name,
         "seed": seed,
         "tabs": [name for name, _ in tabs],
+        "checkbox_conventions": checkbox_conventions,
         "cells": cells,
         "fields": fields,
         "dispositions": dispositions,
@@ -968,6 +1412,8 @@ def build_set(set_name: str, seed: int, out_dir: Path):
         "set": set_name,
         "seed": seed,
         "tabs": gold["tabs"],
+        "homogeneous_tabs": [n for n in gold["tabs"] if n not in MIXED_TABS],
+        "mixed_tabs": [n for n in gold["tabs"] if n in MIXED_TABS],
         "fields": len(fields),
         "cells": len(cells),
         "tag_counts": tag_counts,
@@ -1032,6 +1478,41 @@ def _first_tab_with(gold: dict, predicate) -> str:
         if predicate(f):
             return f["tab"]
     raise ValueError("no matching gold field")
+
+
+def _row_col(cell_id: str) -> tuple[int, int]:
+    _, rc = cell_id.split("!", 1)
+    row, col = rc.split(":", 1)
+    return int(row), int(col)
+
+
+def _between_marker_fields(gold: dict) -> list[tuple[int, str]]:
+    """``(index, marker_id)`` for every gold field a convention is required for.
+
+    A between-marker field's selected option sits after an option on its left, so
+    its marker has option candidates on both sides: only a declared convention
+    can decide it. ``expected_ambiguous`` fields are excluded - their ambiguity
+    is designed, not a missing declaration.
+    """
+    cells_by_id = {c["id"]: c for c in gold["cells"]}
+    out: list[tuple[int, str]] = []
+    for i, f in enumerate(gold["fields"]):
+        if f["kind"] not in ("single", "multi", "bool"):
+            continue
+        if f.get("expected_ambiguous"):
+            continue
+        option_cols = [_row_col(c)[1] for c in f["option_cells"]]
+        if not option_cols:
+            continue
+        for sel in f["selected_option_cells"]:
+            row, col = _row_col(sel)
+            marker_id = f"{f['tab']}!{row}:{col - 1}"
+            marker = cells_by_id.get(marker_id)
+            if marker is not None and marker["role"] == "marker":
+                if any(o < col - 1 for o in option_cols):
+                    out.append((i, marker_id))
+                    break
+    return out
 
 
 def mutations(gold: dict) -> dict[str, dict]:
@@ -1156,6 +1637,18 @@ def mutations(gold: dict) -> dict[str, dict]:
     rec["fields"].append(json.loads(json.dumps(rec["fields"][0])))
     out["duplicate_field"] = rec
 
+    # no checkbox convention declared: every between-marker field is ambiguous.
+    # Each such field moves out of selected_ok (and
+    # selected_ok_under_convention) into unexpected_ambiguous.
+    rec = clone()
+    for index, marker_id in _between_marker_fields(gold):
+        rec["fields"][index]["ambiguity"] = {
+            "marker_element_id": marker_id,
+            "candidate_element_ids": [],
+            "reason": "between_options",
+        }
+    out["declare_nothing"] = rec
+
     return out
 
 
@@ -1176,9 +1669,24 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--set", choices=sorted(VOCAB), default="dev")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--canned", type=Path, default=None)
+    parser.add_argument(
+        "--print-conventions",
+        type=Path,
+        default=None,
+        metavar="GOLD.json",
+        help="print the gold's checkbox_conventions as a JSON list to paste into "
+        "PipelineConfig(checkbox_conventions=...), then exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.print_conventions is not None:
+        doc = json.loads(args.print_conventions.read_text(encoding="utf-8"))
+        print(json.dumps(doc.get("checkbox_conventions") or [], indent=2))
+        return 0
+    if args.out is None:
+        parser.error("--out is required unless --print-conventions is given")
 
     seed = args.seed if args.seed is not None else DEFAULT_SEEDS[args.set]
     gold, manifest, _ = build_set(args.set, seed, args.out)

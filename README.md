@@ -350,22 +350,69 @@ python tools/score_gold.py --gold gold/gold_dev.json --record record.json
 `tools/make_gold.py` (openpyxl only, never imports the package) writes one
 `.xlsx` per tab plus a gold JSON keyed by the xlsx element ids the ingest emits
 (`Sheet!row:col`), so the ground truth is independent of bands, regions and any
-model. The dev set is 12 tabs (~125 fields) covering a closed vocabulary of
-structure tags; `--set heldout` builds a second set with a different seed and a
-different vocabulary, which is never used for tuning. Regeneration is
-deterministic: the same `--seed` and `--set` produce byte-identical files.
+model. The dev set is 16 tabs (~245 fields) covering a closed vocabulary of
+structure tags: twelve homogeneous tabs (one structure each — yes/no rows, dense
+and stacked multi-select, side-by-side, two-row and two-cell labels, text,
+typed values, no-glyph answers, a 50-option grid, a matrix, merged tall cells, a
+gutter column, a non-answer column) and four **mixed** tabs of 60-100 rows that
+place 9+ structure kinds in one tab (the two long-form shapes, a 50-option grid
+and a 12-row yes/no run, in every mixed tab), separated by header/note/skip rows.
+A mixed tab's fields carry `mixed_tab` **in addition to** their structure tag, so
+each structure's score includes its mixed instances and `mixed_tab` reports the
+mixed set as a whole. `--set heldout` builds a second set (two mixed tabs, a
+different seed and a different vocabulary, never used for tuning). Appending the
+mixed tabs leaves every homogeneous tab's bytes unchanged (a committed sha256
+table guards it). Regeneration is deterministic: the same `--seed` and `--set`
+produce byte-identical files.
+
+Every tab records the checkbox convention its generator used, in a
+`checkbox_conventions` list written in exactly the shape
+`PipelineConfig.checkbox_conventions` takes (here: one selector per tab,
+`mark_precedes_option`, because the generator always writes the mark before its
+option). Print it to paste into a run:
+
+```console
+python tools/make_gold.py --print-conventions gold/gold_dev.json
+```
+
+A gold run **must** declare those conventions: a between-marker is `AMBIGUOUS`
+without one. The generator also marks a deliberate subset `expected_ambiguous`
+(the side-by-side tab's shared-marker row, and a two-field shared-marker row in
+every mixed tab), where the ambiguity is the designed outcome, so the scorer does
+not read it as a regression.
 
 `tools/score_gold.py` (stdlib only) compares a record JSON dump — a full
 `InstanceRecord` dump from `to_json`, or a bare `{"fields": [...]}` — against a
 gold file and prints integers and percentages: strict field precision and recall
 (no half credit), `merge_count` / `split_count` / `missed` / `spurious`,
 `stray_ref_count` / `unresolved_ref_count`, and on matched pairs `label_ok`,
-`options_ok`, `selected_ok`, `answer_ok`, plus `addressed` (a **perception**
-coverage: the share of gold label/option cells any predicted field cites). Every
-number is also reported per structure tag (`small_n` marks a tag with fewer than
-five gold instances). The output contains only integers, percentages and tag
-names — never a label, a cell text or a tab name — so the same scorer can be run
-on your own workbook's gold: it prints numbers only.
+`options_ok`, `answer_ok`, `selected_ok` split into `selected_ok_under_convention`
+(a field the resolver decided) plus `selected_ambiguous_expected` (a field the
+gold expects to stay ambiguous), with `unexpected_ambiguous` counted per tag
+(the signal that a convention was not declared or could not apply), plus
+`addressed` (a **perception** coverage: the share of gold label/option cells any
+predicted field cites). Every number is also reported per structure tag
+(`small_n` marks a tag with fewer than five gold instances). The output contains
+only integers, percentages and tag names — never a label, a cell text or a tab
+name — so the same scorer can be run on your own workbook's gold: it prints
+numbers only.
+
+To score a whole gold set end to end, run every tab through the real pipeline and
+print one line of numbers:
+
+```console
+python tools/live_probe.py --gold gold --provider gemini --model gemini-2.5-flash-lite \
+    --param thinkingBudget=0
+python tools/score_gold.py --gold gold/gold_dev.json --record record.json --json
+```
+
+`live_probe.py --gold DIR` takes a directory made by `make_gold.py --out`, runs
+each tab's `.xlsx` through the real `Pipeline` with the gold's own conventions
+declared, a throwaway store and `--workers` as `chunk_workers`, refuses (exit 2) a
+directory whose tabs no longer match the manifest sha256, and prints one JSON
+line of numbers: the scorer's headline counters (plus per-tag `matched`/`gold`)
+and the probe's usual cost keys. `--record-out PATH` writes the combined record
+dump only when asked.
 
 ```console
 python tools/score_gold.py --gold gold/gold_dev.json --record record.json --json

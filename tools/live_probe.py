@@ -18,29 +18,38 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import socket
 import statistics
 import sys
+import tempfile
 import time
 import traceback
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
+
+import score_gold
 
 from formextract.coverage import compute_coverage
 from formextract.ingest import ingest
 from formextract.layout import analyze
-from formextract.pipeline import page_tabs_for
+from formextract.model import to_dict
+from formextract.pipeline import Pipeline, PipelineConfig, page_tabs_for
 from formextract.resolve import (
+    LLMResponse,
     ProjectionChunk,
     build_prompt,
     drafts_to_fields,
     parse_drafts_with_errors,
     project_chunks,
 )
+from formextract.store import Store
 
 FINISH_CLASSES = ("stop", "length", "safety", "other", "none")
 STATUS_CLASSES = ("complete", "partial", "failed")
@@ -619,6 +628,226 @@ def _write_dump(path: str, entries: list) -> None:
 
 
 # ---------------------------------------------------------------------------
+# gold mode: run every gold tab through the real Pipeline, then score it
+# ---------------------------------------------------------------------------
+class GoldInputError(Exception):
+    """A ``--gold`` directory that cannot be used (exit code 2)."""
+
+
+class _ProviderError(Exception):
+    """A provider failure raised out of the probe's gold client.
+
+    Carries the HTTP class; a 4xx is given a status code so the pipeline's retry
+    loop makes exactly one attempt for it, like any other non-retryable error.
+    """
+
+    _STATUS = {"4xx": 400, "5xx": 500}
+
+    def __init__(self, http_error: str) -> None:
+        super().__init__(f"provider error: {http_error}")
+        self.http_error = http_error
+        self.status_code = self._STATUS.get(http_error)
+
+
+class _ProviderClient:
+    """The probe's provider-backed ``LLMClient`` plus its call accounting."""
+
+    def __init__(self, *, provider, base_url, key, max_tokens):
+        self.provider = provider
+        self.base_url = base_url
+        self.key = key
+        self.max_tokens = max_tokens
+        self.calls = 0
+        self.prompt_tokens = 0
+        self.output_tokens = 0
+        self.reasoning_tokens = 0
+        self.saw_prompt = False
+        self.saw_output = False
+        self.saw_reasoning = False
+        self.finish_counts = {name: 0 for name in FINISH_CLASSES}
+        self.truncated = 0
+        self.http_error_class = "none"
+
+    def complete(
+        self, prompt: str, *, model: str, params: dict[str, Any]
+    ) -> LLMResponse:
+        call = call_provider(
+            self.provider, self.base_url, self.key, model, prompt, params, self.max_tokens
+        )
+        self.calls += 1
+        self.finish_counts[call["finish_class"]] += 1
+        if call["prompt_tokens"] is not None:
+            self.prompt_tokens += call["prompt_tokens"]
+            self.saw_prompt = True
+        if call["output_tokens"] is not None:
+            self.output_tokens += call["output_tokens"]
+            self.saw_output = True
+        if call["reasoning_tokens"] is not None:
+            self.reasoning_tokens += call["reasoning_tokens"]
+            self.saw_reasoning = True
+        if _is_truncated(call["content"]):
+            self.truncated += 1
+        if call["http_error"] != "none":
+            if self.http_error_class == "none":
+                self.http_error_class = call["http_error"]
+            raise _ProviderError(call["http_error"])
+        return LLMResponse(
+            text=call["content"],
+            model=model,
+            params=params,
+            tokens=call["output_tokens"],
+            latency_ms=None,
+        )
+
+
+def _load_gold_dir(gold_dir: Path) -> tuple[dict, dict]:
+    if not gold_dir.is_dir():
+        raise GoldInputError(f"--gold is not a directory: {gold_dir}")
+    golds = sorted(
+        p for p in gold_dir.glob("gold_*.json") if not p.name.startswith("gold_manifest_")
+    )
+    manifests = sorted(gold_dir.glob("gold_manifest_*.json"))
+    if len(golds) != 1 or len(manifests) != 1:
+        raise GoldInputError(
+            "a --gold directory must hold one gold_*.json and one gold_manifest_*.json"
+        )
+    try:
+        gold_doc = json.loads(golds[0].read_text(encoding="utf-8"))
+        manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GoldInputError(f"cannot read the gold directory: {exc}") from exc
+    if not isinstance(gold_doc.get("tabs"), list) or not isinstance(
+        manifest.get("tab_sha256"), dict
+    ):
+        raise GoldInputError("the gold directory is missing its tabs or tab_sha256")
+    return gold_doc, manifest
+
+
+def _verify_gold_manifest(gold_dir: Path, gold_doc: dict, manifest: dict) -> None:
+    """Refuse a gold directory whose tabs no longer match the manifest.
+
+    The message never names a sheet, so the failure stays numbers/tags only.
+    """
+    for tab in gold_doc["tabs"]:
+        path = gold_dir / f"{tab}.xlsx"
+        if not path.is_file():
+            raise GoldInputError("a gold tab is missing its .xlsx")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != manifest["tab_sha256"].get(tab):
+            raise GoldInputError("a gold tab does not match the manifest sha256")
+
+
+def _score_gold(gold_doc: dict, dump: dict) -> dict:
+    gold = score_gold.Gold(gold_doc)
+    predicted, stray, unresolved = score_gold._predicted_fields(
+        gold, score_gold._extract_fields(dump)
+    )
+    disposition = score_gold._disposition_accuracy(gold, dump)
+    return score_gold.score_document(gold, predicted, stray, unresolved, disposition)
+
+
+def run_gold_once(
+    *, gold_dir, provider, base_url, key, model, params, max_tokens, workers
+) -> tuple[dict, dict, "_ProviderClient", float]:
+    """Run every gold tab through the real Pipeline.
+
+    A throwaway Store in a temp dir (nothing archived under the repo, the temp
+    store is deleted), the gold's own conventions declared, ``workers`` as
+    ``chunk_workers``. Returns ``(dump, gold_doc, client, seconds)`` where
+    ``dump`` is one record dump of every tab's fields.
+    """
+    gold_dir = Path(gold_dir)
+    gold_doc, manifest = _load_gold_dir(gold_dir)
+    _verify_gold_manifest(gold_dir, gold_doc, manifest)
+    config = PipelineConfig(
+        model=model,
+        params=params,
+        checkbox_conventions=list(gold_doc.get("checkbox_conventions") or []),
+        chunk_workers=workers,
+    )
+    client = _ProviderClient(
+        provider=provider, base_url=base_url, key=key, max_tokens=max_tokens
+    )
+    fields: list = []
+    workdir = Path(tempfile.mkdtemp(prefix="probe-gold-"))
+    started = time.perf_counter()
+    try:
+        store = Store(workdir)
+        for tab in gold_doc["tabs"]:
+            record = Pipeline(store, client, config).run(gold_dir / f"{tab}.xlsx")
+            fields.extend(record.fields)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    seconds = time.perf_counter() - started
+    return {"fields": [to_dict(field) for field in fields]}, gold_doc, client, seconds
+
+
+def _gold_output(gold_doc: dict, score: dict, client: "_ProviderClient", seconds: float) -> dict:
+    o = score["overall"]
+    per_tag = {
+        tag: {"matched": t["matched"], "gold": t["gold_fields"]}
+        for tag, t in score["per_tag"].items()
+    }
+    return {
+        "gold_tabs": len(gold_doc["tabs"]),
+        "calls": client.calls,
+        "seconds": seconds,
+        "prompt_tokens": client.prompt_tokens if client.saw_prompt else None,
+        "output_tokens": client.output_tokens if client.saw_output else None,
+        "reasoning_tokens": client.reasoning_tokens if client.saw_reasoning else None,
+        "finish_reason_class_counts": dict(client.finish_counts),
+        "truncated_count": client.truncated,
+        "http_error_class": client.http_error_class,
+        "gold_fields": o["gold_fields"],
+        "predicted_fields": o["predicted_fields"],
+        "matched": o["matched"],
+        "precision_num": o["precision_num"],
+        "precision_den": o["precision_den"],
+        "recall_num": o["recall_num"],
+        "recall_den": o["recall_den"],
+        "precision": o["precision"],
+        "recall": o["recall"],
+        "merge_count": o["merge_count"],
+        "split_count": o["split_count"],
+        "missed": o["missed"],
+        "spurious": o["spurious"],
+        "stray_ref_count": o["stray_ref_count"],
+        "unresolved_ref_count": o["unresolved_ref_count"],
+        "label_ok": o["label_ok"],
+        "label_total": o["label_total"],
+        "options_ok": o["options_ok"],
+        "options_total": o["options_total"],
+        "selected_ok": o["selected_ok"],
+        "selected_total": o["selected_total"],
+        "selected_ok_under_convention": o["selected_ok_under_convention"],
+        "selected_ambiguous_expected": o["selected_ambiguous_expected"],
+        "unexpected_ambiguous": o["unexpected_ambiguous"],
+        "answer_ok": o["answer_ok"],
+        "answer_total": o["answer_total"],
+        "addressed_num": o["addressed_num"],
+        "addressed_den": o["addressed_den"],
+        "per_tag": per_tag,
+    }
+
+
+def _execute_gold(args, key: str, base_url: str, params: dict[str, Any]) -> dict[str, Any]:
+    dump, gold_doc, client, seconds = run_gold_once(
+        gold_dir=args.gold,
+        provider=args.provider,
+        base_url=base_url,
+        key=key,
+        model=args.model,
+        params=params,
+        max_tokens=args.max_tokens,
+        workers=args.workers,
+    )
+    if args.record_out:
+        with open(args.record_out, "w", encoding="utf-8") as handle:
+            json.dump(dump, handle, ensure_ascii=False, indent=2)
+    return _gold_output(gold_doc, _score_gold(gold_doc, dump), client, seconds)
+
+
+# ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -665,6 +894,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--tiny",
         action="store_true",
         help="send a fixed tiny prompt and report floor_seconds",
+    )
+    parser.add_argument(
+        "--gold",
+        default=None,
+        metavar="DIR",
+        help="run every tab of a make_gold --out directory through the real "
+        "Pipeline with the gold's own conventions and print one line of numbers",
+    )
+    parser.add_argument(
+        "--record-out",
+        default=None,
+        metavar="PATH",
+        help="write the combined record dump here (--gold only; off by default)",
     )
     parser.add_argument(
         "--dump",
@@ -736,8 +978,8 @@ def _execute(args, key: str, base_url: str, params: dict[str, Any]) -> dict[str,
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not args.tiny and args.path is None:
-        parser.error("the workbook path is required unless --tiny is given")
+    if not args.tiny and args.gold is None and args.path is None:
+        parser.error("the workbook path is required unless --tiny or --gold is given")
     if args.repeat < 1:
         parser.error("--repeat must be >= 1")
     if args.workers < 1:
@@ -757,7 +999,13 @@ def main(argv: list[str] | None = None) -> int:
     params = build_params(args.param, args.no_temperature)
 
     try:
-        output = _execute(args, key, base_url, params)
+        if args.gold is not None:
+            output = _execute_gold(args, key, base_url, params)
+        else:
+            output = _execute(args, key, base_url, params)
+    except GoldInputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     except Exception as exc:  # noqa: BLE001 - report a class, never a body
         class_name, message, _traceback_text = render_error(exc, secrets)
         print(f"error: {class_name}: {message}", file=sys.stderr)

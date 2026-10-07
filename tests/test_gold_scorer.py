@@ -84,72 +84,110 @@ def _overall(gold_doc: dict, record_path: Path) -> dict:
 #   (then read the scorer's overall counters for the perfect and mutated dumps)
 # --------------------------------------------------------------------------
 
+#: sha256 of every homogeneous tab, captured before the mixed tabs were added.
+#: The mixed tabs are appended and draw from their own RNG stream, so these
+#: bytes must never move. Extend this table when a new homogeneous tab is added;
+#: never edit a row.
+OLD_TAB_SHA256 = {
+    "dev": {
+        "Dev01": "2dc20f1c91027f95bcf839b75bbcb9b95392894c9a0e530d9dcb81771d232cf9",
+        "Dev02": "efe09b660eb64de4acbd11a92d6de4bfed2bfdd794fe266ab6144eae952b91df",
+        "Dev03": "69d77c067bc2f3cb33adb8449e2b9d35082bcc74b5a7599e1bdbc5b0a89224fb",
+        "Dev04": "958aed4fef885404257d8aa7bfc20faa6d7d15097d2264e9a9e92d51362c98d7",
+        "Dev05": "477ac3a7db2a27c8896c012a9f9d4437231c7347a4f3bcafbe36ed3c4fa5ab3a",
+        "Dev06": "1e7b76d4012bf8079d61a38e50e9eb58aaa2b33b46ff01c1bf53164d4b5bc78f",
+        "Dev07": "4113cf61cb56cfd32abbe4e6d4326f74fcca81672164da5bf2a483d0bed2ac75",
+        "Dev08": "f37e5dc6a382729faf9f2fea7503cc5468d7c7b9edfed941801989cb788087c0",
+        "Dev09": "1a85746d11a660ab27acecb6ee5a4f6055001a6c0473a5964c94222913ca6215",
+        "Dev10": "3c2a0f0c7d1eac795716e6628379cfcce9097e0b4939c8acaabe57ae7a5c75f0",
+        "Dev11": "6579c6060d444a8c4f8b77422d593b8b914d558657a3519b11a0fb9e679c0a05",
+        "Dev12": "45f6be470a83e35180f563ea26dbc30d453a2858398938b4cfa2ef43f52a99f8",
+    },
+    "heldout": {
+        "Hold01": "45fca88fb2caa66ab82183809086c721d0ee14036e357890f2e09443669b1891",
+        "Hold02": "3e7d1ec15807c7a2e4c9734da35ad0fb9a9b365520892afbb3f9a9d9364e2c09",
+        "Hold03": "bdd6da4ea13674d1fa25d1361a7d80e0528727142ab4d0898ab67e0ab3ed881d",
+        "Hold04": "752bae2209d150552995646fa80bee6723a85c02bd2895358307240414278694",
+        "Hold05": "bf440d8141cad98f14b0ce83dba5baa254157f377d5d719382c08fed5aa47bb5",
+        "Hold06": "36e27ae43c862f3917665385dcc39a8f39fac00b6985e95df8b6c4a15792a42c",
+    },
+}
+
 PERFECT_COUNTERS = {
-    "gold_fields": 125,
-    "predicted_fields": 125,
-    "matched": 125,
+    "gold_fields": 244,
+    "predicted_fields": 244,
+    "matched": 244,
     "merge_count": 0,
     "split_count": 0,
     "missed": 0,
     "spurious": 0,
     "stray_ref_count": 0,
     "unresolved_ref_count": 0,
-    "label_ok": 125,
-    "label_total": 125,
-    "options_ok": 125,
-    "options_total": 125,
-    "selected_ok": 90,
-    "selected_total": 90,
-    "answer_ok": 35,
-    "answer_total": 35,
-    "addressed_num": 628,
-    "addressed_den": 628,
-    "precision_num": 125,
-    "precision_den": 125,
-    "recall_num": 125,
-    "recall_den": 125,
+    "label_ok": 244,
+    "label_total": 244,
+    "options_ok": 244,
+    "options_total": 244,
+    "selected_ok": 180,
+    "selected_total": 180,
+    "selected_ok_under_convention": 170,
+    "selected_ambiguous_expected": 10,
+    "unexpected_ambiguous": 0,
+    "answer_ok": 64,
+    "answer_total": 64,
+    "addressed_num": 1140,
+    "addressed_den": 1140,
+    "precision_num": 244,
+    "precision_den": 244,
+    "recall_num": 244,
+    "recall_den": 244,
     "precision": 1.0,
     "recall": 1.0,
     "addressed": 1.0,
 }
 
 MUTATION_DELTAS = {
+    "declare_nothing": {
+        "selected_ok": -58, "selected_ok_under_convention": -58,
+        "unexpected_ambiguous": 58,
+    },
     "drop_field": {
         "predicted_fields": -1, "matched": -1, "missed": 1, "label_ok": -1,
         "label_total": -1, "options_ok": -1, "options_total": -1,
-        "selected_ok": -1, "selected_total": -1, "addressed_num": -3,
+        "selected_ok": -1, "selected_total": -1,
+        "selected_ok_under_convention": -1, "addressed_num": -4,
         "precision_num": -1, "precision_den": -1, "recall_num": -1,
     },
     "duplicate_field": {
         "predicted_fields": 1, "spurious": 1, "precision_den": 1,
     },
     "empty_fields": {
-        "predicted_fields": -125, "matched": -125, "missed": 125,
-        "label_ok": -125, "label_total": -125, "options_ok": -125,
-        "options_total": -125, "selected_ok": -90, "selected_total": -90,
-        "answer_ok": -35, "answer_total": -35, "addressed_num": -628,
-        "precision_num": -125, "precision_den": -125, "recall_num": -125,
+        "predicted_fields": -244, "matched": -244, "missed": 244,
+        "label_ok": -244, "label_total": -244, "options_ok": -244,
+        "options_total": -244, "selected_ok": -180, "selected_total": -180,
+        "selected_ok_under_convention": -170, "selected_ambiguous_expected": -10,
+        "answer_ok": -64, "answer_total": -64, "addressed_num": -1140,
+        "precision_num": -244, "precision_den": -244, "recall_num": -244,
     },
     "merge_two": {
         "predicted_fields": -1, "matched": -2, "merge_count": 1,
         "label_ok": -2, "label_total": -2, "options_ok": -2,
         "options_total": -2, "selected_ok": -2, "selected_total": -2,
-        "precision_num": -2, "precision_den": -2, "recall_num": -2,
-        "recall_den": -2,
+        "selected_ok_under_convention": -2, "precision_num": -2,
+        "precision_den": -2, "recall_num": -2, "recall_den": -2,
     },
     "missing_tab": {
         "predicted_fields": -14, "matched": -14, "missed": 14,
         "label_ok": -14, "label_total": -14, "options_ok": -14,
         "options_total": -14, "selected_ok": -14, "selected_total": -14,
-        "addressed_num": -42, "precision_num": -14, "precision_den": -14,
-        "recall_num": -14,
+        "selected_ok_under_convention": -14, "addressed_num": -42,
+        "precision_num": -14, "precision_den": -14, "recall_num": -14,
     },
     "split_one": {
         "predicted_fields": 1, "matched": -1, "split_count": 1,
         "label_ok": -1, "label_total": -1, "options_ok": -1,
         "options_total": -1, "selected_ok": -1, "selected_total": -1,
-        "precision_num": -1, "precision_den": -1, "recall_num": -1,
-        "recall_den": -1,
+        "selected_ok_under_convention": -1, "precision_num": -1,
+        "precision_den": -1, "recall_num": -1, "recall_den": -1,
     },
     "stray_id": {"stray_ref_count": 1},
     "unresolved_ref": {"unresolved_ref_count": 1},
@@ -157,11 +195,12 @@ MUTATION_DELTAS = {
     "wrong_kind": {
         "matched": -1, "missed": 1, "spurious": 1, "label_ok": -1,
         "label_total": -1, "options_ok": -1, "options_total": -1,
-        "selected_ok": -1, "selected_total": -1, "precision_num": -1,
+        "selected_ok": -1, "selected_total": -1,
+        "selected_ok_under_convention": -1, "precision_num": -1,
         "recall_num": -1,
     },
     "wrong_label": {"label_ok": -1},
-    "wrong_selected": {"selected_ok": -1},
+    "wrong_selected": {"selected_ok": -1, "selected_ok_under_convention": -1},
 }
 
 
@@ -197,6 +236,95 @@ def test_every_field_tag_has_at_least_six_dev_instances(gold):
         assert counts[tag] >= 6, (tag, counts[tag])
     for tag in make_gold.DISPOSITION_TAGS:
         assert gold["dev_manifest"]["disposition_counts"][tag] >= 1
+
+
+def test_old_tabs_are_byte_identical(gold):
+    for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
+        sha = gold[key]["tab_sha256"]
+        for tab, expected in OLD_TAB_SHA256[set_name].items():
+            assert sha[tab] == expected, (tab, sha[tab], expected)
+    for tab in make_gold.MIXED_DEV_TABS:
+        assert tab not in OLD_TAB_SHA256["dev"]
+
+
+def test_manifest_declares_homogeneous_and_mixed_tabs(gold):
+    dev = gold["dev_manifest"]
+    assert dev["mixed_tabs"] == list(make_gold.MIXED_DEV_TABS)
+    assert dev["homogeneous_tabs"] == [
+        tab for tab in dev["tabs"] if tab not in make_gold.MIXED_TABS
+    ]
+    assert set(dev["homogeneous_tabs"]) | set(dev["mixed_tabs"]) == set(dev["tabs"])
+    assert set(dev["homogeneous_tabs"]) & set(dev["mixed_tabs"]) == set()
+    assert gold["held_manifest"]["mixed_tabs"] == list(make_gold.MIXED_HELD_TABS)
+
+
+def test_mixed_tabs_have_the_required_shapes(gold):
+    doc = gold["dev_gold"]
+    mixed: dict[str, list] = {tab: [] for tab in make_gold.MIXED_DEV_TABS}
+    for field in doc["fields"]:
+        if field["tab"] in mixed:
+            mixed[field["tab"]].append(field)
+    assert set(mixed) == set(make_gold.MIXED_DEV_TABS)
+    for tab, fields in mixed.items():
+        workbook = openpyxl.load_workbook(filename=str(gold["dev_dir"] / f"{tab}.xlsx"))
+        rows = workbook.active.max_row
+        workbook.close()
+        assert 60 <= rows <= 100, (tab, rows)
+        structures = {t for f in fields for t in f["tags"] if t != "mixed_tab"}
+        assert len(structures) >= 5, (tab, structures)
+        # the two long-form shapes are present in every mixed tab
+        assert "grid_50" in structures, (tab, structures)
+        assert sum(1 for f in fields if "yes_no_row" in f["tags"]) >= 10, tab
+
+
+def test_mixed_fields_also_carry_their_structure_tag(gold):
+    for field in gold["dev_gold"]["fields"]:
+        if field["tab"] in make_gold.MIXED_DEV_TABS:
+            assert "mixed_tab" in field["tags"], field["field_id_gold"]
+            assert [t for t in field["tags"] if t != "mixed_tab"], field["field_id_gold"]
+        else:
+            assert "mixed_tab" not in field["tags"], field["field_id_gold"]
+
+
+def test_mixed_tabs_add_no_shared_label_option_text(gold):
+    # the existing disjointness test already covers the mixed tabs; restate it
+    # explicitly so a future held-out mix cannot quietly share a string
+    dev = _label_option_texts(gold["dev_gold"])
+    held = _label_option_texts(gold["held_gold"])
+    assert dev & held == set()
+
+
+def test_gold_declares_one_checkbox_convention_per_tab(gold):
+    doc = gold["dev_gold"]
+    conventions = doc["checkbox_conventions"]
+    assert [c["tab"] for c in conventions] == doc["tabs"]
+    for entry in conventions:
+        assert set(entry) == {"tab", "anchor_pattern", "convention"}
+        assert entry["anchor_pattern"] is None
+        assert entry["convention"] == "mark_precedes_option"
+
+
+def test_print_conventions_roundtrips_through_normalize(gold, capsys):
+    from formextract.pipeline import _normalize_checkbox_conventions
+
+    gold_path = gold["dev_dir"] / "gold_dev.json"
+    assert make_gold.main(["--print-conventions", str(gold_path)]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == gold["dev_gold"]["checkbox_conventions"]
+    normalized = _normalize_checkbox_conventions(printed)
+    assert [c.tab for c in normalized] == gold["dev_gold"]["tabs"]
+
+
+def test_perfect_dump_selected_split_is_consistent(gold):
+    overall = _overall(
+        gold["dev_gold"], gold["dev_dir"] / "canned" / "perfect_dev.json"
+    )
+    assert overall["selected_ok"] == (
+        overall["selected_ok_under_convention"]
+        + overall["selected_ambiguous_expected"]
+    )
+    assert overall["selected_ambiguous_expected"] > 0
+    assert overall["unexpected_ambiguous"] == 0
 
 
 def test_manifest_counts_match_a_gold_recount(gold):
@@ -565,24 +693,37 @@ def test_scorer_accepts_a_real_instance_record_dump(tmp_path):
 # Static import scan
 # --------------------------------------------------------------------------
 
-def test_tools_import_neither_package_nor_each_other():
+def _tool_imports(name: str) -> set[str]:
     import ast
 
+    source = (REPO / "tools" / name).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported.add(node.module.split(".")[0])
+    return imported
+
+
+def test_tools_import_neither_package_nor_each_other():
     for name in ("make_gold.py", "score_gold.py"):
-        source = (REPO / "tools" / name).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        imported: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    imported.add(node.module.split(".")[0])
+        imported = _tool_imports(name)
         assert "formextract" not in imported, name
         assert "make_gold" not in imported, name
         assert "score_gold" not in imported, name
+        assert "live_probe" not in imported, name
 
     scorer = (REPO / "tools" / "score_gold.py").read_text(encoding="utf-8")
     assert "import openpyxl" not in scorer
     generator = (REPO / "tools" / "make_gold.py").read_text(encoding="utf-8")
     assert "import openpyxl" in generator
+
+    # The direction: the probe MAY import the scorer, the scorer must never
+    # import the probe (or the package, or the generator).
+    probe_imports = _tool_imports("live_probe.py")
+    assert "score_gold" in probe_imports
+    assert "live_probe" not in _tool_imports("score_gold.py")
+    assert "formextract" in probe_imports

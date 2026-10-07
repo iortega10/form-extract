@@ -62,15 +62,29 @@ single schema version bump per output-changing release.
   contract and of any model. `make_gold.py` (openpyxl only, never imports the
   package) writes deterministic `.xlsx` tabs whose correct fields are known by
   construction, plus a gold JSON and manifest keyed by the xlsx element ids the
-  ingest emits (`Sheet!row:col`); the dev set is 12 tabs (~125 fields) covering
-  a closed structure-tag vocabulary (each field tag ≥ 6 instances) and the
-  held-out set is a different seed and vocabulary. `score_gold.py` (stdlib only)
-  compares a record JSON dump against gold and prints strict field
-  precision/recall (no half credit), `merge_count`/`split_count`/`missed`/
-  `spurious`, `stray_ref_count`/`unresolved_ref_count`, the matched-pair
-  `label_ok`/`options_ok`/`selected_ok`/`answer_ok`, and `addressed`
-  (perception), overall and per tag — integers, percentages and tag names only,
-  never a label, cell text or tab name, so it is safe on private gold.
+  ingest emits (`Sheet!row:col`); the dev set is 16 tabs (~245 fields): twelve
+  homogeneous tabs and four **mixed** tabs (60-100 rows, 9+ structure kinds each,
+  a 50-option grid and a 12-row yes/no run in every one) whose fields also carry
+  the `mixed_tab` tag, and the held-out set is a different seed and vocabulary.
+  Each tab records the checkbox convention its generator used, in the exact shape
+  `PipelineConfig.checkbox_conventions` takes, and `--print-conventions
+  GOLD.json` prints that list. `score_gold.py` (stdlib only) compares a record
+  JSON dump against gold and prints strict field precision/recall (no half
+  credit), `merge_count`/`split_count`/`missed`/`spurious`,
+  `stray_ref_count`/`unresolved_ref_count`, the matched-pair
+  `label_ok`/`options_ok`/`answer_ok`/`selected_ok`,
+  `selected_ok_under_convention`/`selected_ambiguous_expected`/
+  `unexpected_ambiguous`, and `addressed` (perception), overall and per tag —
+  integers, percentages and tag names only, never a label, cell text or tab name,
+  so it is safe on private gold.
+- **`tools/live_probe.py --gold DIR`.** A whole-set live run: every tab of a
+  `make_gold.py --out` directory is run through the real `Pipeline` (the gold's
+  own conventions declared, a throwaway store in a temp dir, `--workers` as
+  `chunk_workers`) and one JSON line of numbers is printed — the scorer's
+  headline counters plus per-tag `matched`/`gold` and the probe's usual cost
+  keys. `--record-out PATH` writes the combined record dump only when asked, and
+  a directory whose tabs no longer match the manifest sha256 is refused (exit 2).
+  Key safety is unchanged.
 
 ### Changed
 
@@ -87,9 +101,32 @@ single schema version bump per output-changing release.
   simply carries `coverage=[]` until the cache is cleared or `force=True` is
   used. That is the cost of not invalidating: the field is additive, so
   `SCHEMA_VERSION` does not move.
+- **Gold schema v2 and the selection split.** `gold_version` moves to `2`: the
+  gold JSON gains a per-tab `checkbox_conventions` list and the manifest gains
+  `homogeneous_tabs`/`mixed_tabs` (and `mixed_tab` joins the tag vocabulary). The
+  scorer's `selected_ok` is now the sum of `selected_ok_under_convention` (a field
+  the resolver decided) and `selected_ambiguous_expected` (a gold
+  `expected_ambiguous` field), with a new per-tag `unexpected_ambiguous` for a
+  predicted ambiguity on a field the gold does not expect to be ambiguous — the
+  signal that a convention was not declared or could not apply. Both tools stay
+  stdlib/openpyxl only and no package version constant moves.
 
 ### Fixed
 
+- **`Field.tab` is populated for a region-less field.** `drafts_to_fields` set
+  `tab` only when the model's `region_id` resolved, so a field whose region did
+  not resolve carried `tab=None` — and `_matching_conventions` skips its tab
+  filter for a null tab, so *every* declared `checkbox_conventions` selector
+  matched and the longest/most specific one could win even when it belonged to a
+  different tab. `BindingDraft` gains a defaulted `tab`, `author_drafts` sets it
+  from the projection chunk's key, and `drafts_to_fields` falls back to it when
+  the region is missing; when a region resolves the computed tab is unchanged and
+  agrees with the carried one. `field_id` is unchanged (it never includes the
+  tab). `SCHEMA_VERSION` and `PROMPT_VERSION` do not move; `PIPELINE_VERSION` is
+  deliberately **not** bumped here even though a run's output changes (a
+  region-less field now carries `tab`): 0.6.0 is unreleased and the planned
+  `PIPELINE_VERSION` `"4"` move lands with the contract turn, which must also
+  invalidate such cached entries.
 - **A 4xx is no longer retried.** `resolve._complete_with_retries` made three
   attempts with backoff for *any* exception. A new `resolve.NonRetryable`
   marker (raise it, or wrap the provider's error in it) plus a total attribute

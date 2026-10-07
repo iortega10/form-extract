@@ -338,6 +338,11 @@ class BindingDraft:
     address: RelationalAddress | None = None
     confidence: float | None = None
     provenance: BindingProvenance | None = None
+    #: The projection chunk's tab, set by ``author_drafts``. Consumed by
+    #: ``drafts_to_fields`` when a draft's ``region_id`` does not resolve, so a
+    #: region-less field still reports its tab (and a tab-matched convention can
+    #: still apply to it). Never serialised: it is not part of a record.
+    tab: str | None = None
 
 
 @dataclass

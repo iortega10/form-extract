@@ -8,11 +8,14 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 if str(REPO / "tools") not in sys.path:
     sys.path.insert(0, str(REPO / "tools"))
 
 import live_probe as probe  # noqa: E402
+import make_gold  # noqa: E402
 
 FIELD_LABEL = "ZZTOP-SECRET-LABEL"
 OK_FIELDS = (
@@ -547,3 +550,324 @@ def test_dump_writes_text_only_when_asked(tmp_path, capsys):
     assert "may contain private data" in err
     payload = json.loads(dump.read_text(encoding="utf-8"))
     assert payload["calls"][0]["prompt"]
+
+
+# --------------------------------------------------------------------------
+# --gold mode: run every gold tab through the real Pipeline and score it
+# --------------------------------------------------------------------------
+
+_CONTROL = {
+    "single": "single_select",
+    "multi": "multi_select",
+    "bool": "bool",
+    "text": "text",
+}
+
+
+def _ref_for(layout, element_id: str):
+    from formextract.model import ElementRef
+
+    for key, bands in layout.bands.items():
+        column = key % 1000
+        for band_id, band in enumerate(bands):
+            for segment, eid in enumerate(band):
+                if eid == element_id:
+                    region = next(
+                        r
+                        for r in layout.regions
+                        if r.column == column and band_id in r.band_ids
+                    )
+                    return ElementRef(
+                        region_id=region.region_id,
+                        band_id=band_id,
+                        segment_index=segment,
+                    )
+    raise AssertionError(element_id)
+
+
+def _ref_dict(ref) -> dict:
+    return {
+        "region_id": ref.region_id,
+        "band_id": ref.band_id,
+        "segment_index": ref.segment_index,
+    }
+
+
+def _fields_for_tab(gold_doc: dict, tab: str, layout) -> list:
+    cells = {c["id"]: c for c in gold_doc["cells"]}
+    out = []
+    for field in gold_doc["fields"]:
+        if field["tab"] != tab:
+            continue
+        cell_ids = (
+            field["label_cells"]
+            + field["option_cells"]
+            + field["answer_cells"]
+            + field["annotation_cells"]
+        )
+        refs = {cid: _ref_dict(_ref_for(layout, cid)) for cid in cell_ids}
+        out.append(
+            {
+                "label": " ".join(cells[c]["text"] for c in field["label_cells"]),
+                "control_type": _CONTROL[field["kind"]],
+                "options": [
+                    {
+                        "text": cells[cid]["text"],
+                        "selected": cid in field["selected_option_cells"],
+                    }
+                    for cid in field["option_cells"]
+                ],
+                "answer": (
+                    [field["answer_text"]]
+                    if field["kind"] == "text" and field["answer_text"]
+                    else []
+                ),
+                "annotations": [
+                    cells[c]["text"] for c in field["annotation_cells"]
+                ],
+                "region_id": refs[cell_ids[0]]["region_id"],
+                "source_elements": [refs[c] for c in cell_ids],
+            }
+        )
+    return out
+
+
+def _gold_payloads(gold_dir, gold_doc, *, keep=None) -> list:
+    """One OpenAI-style response body per tab, built from the real layout."""
+    from formextract.ingest import ingest
+    from formextract.layout import analyze
+
+    bodies = []
+    for tab in gold_doc["tabs"]:
+        ing = ingest(gold_dir / f"{tab}.xlsx")
+        layout = analyze(ing.elements)
+        fields = _fields_for_tab(gold_doc, tab, layout)
+        if keep is not None:
+            fields = [f for i, f in enumerate(fields) if keep(i)]
+        bodies.append(_openai_body(json.dumps({"fields": fields}), "stop"))
+    return bodies
+
+
+@contextlib.contextmanager
+def _scripted_server(responses: list, *, key: str = ""):
+    state = {"requests": [], "counts": {}, "index": 0, "key": key, "responses": responses}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: D102 - silence the test server
+            pass
+
+        def do_POST(self):  # noqa: N802 - http.server API
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            state["requests"].append(
+                {
+                    "path": self.path,
+                    "headers": {k.lower(): v for k, v in self.headers.items()},
+                }
+            )
+            route = self.path.split("?", 1)[0].strip("/").split("/")[0]
+            state["counts"][route] = state["counts"].get(route, 0) + 1
+            if route == "e401":
+                payload = (
+                    '{"error": {"message": "invalid key: ' + key + '"}}'
+                ).encode()
+                self._send(401, payload)
+                return
+            i = state["index"]
+            state["index"] = i + 1
+            self._send(200, state["responses"][min(i, len(state["responses"]) - 1)])
+
+        def _send(self, code: int, payload: bytes) -> None:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server, f"http://127.0.0.1:{server.server_address[1]}", state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def gold_dir(tmp_path_factory):
+    base = tmp_path_factory.mktemp("probe-gold")
+    original = make_gold.HELDOUT_TABS
+    make_gold.HELDOUT_TABS = (
+        ("PYesNo", make_gold._tab_yes_no),
+        ("PDense", make_gold._tab_dense),
+        ("PText", make_gold._tab_text_and_typed),
+        ("PSide", make_gold._tab_side_by_side),
+    )
+    try:
+        gold, _manifest, _ = make_gold.build_set(
+            "heldout", make_gold.DEFAULT_SEEDS["heldout"], base
+        )
+    finally:
+        make_gold.HELDOUT_TABS = original
+    return base, gold
+
+
+def _gold_args(base: str, gold_path, *extra: str) -> list:
+    return [
+        "--gold", str(gold_path),
+        "--provider", "openai",
+        "--model", "test-model",
+        "--base-url", base,
+        "--env-var", "",
+        *extra,
+    ]
+
+
+def test_gold_mode_scores_a_perfect_server_run(gold_dir, capsys):
+    gold_path, gold_doc = gold_dir
+    bodies = _gold_payloads(gold_path, gold_doc)
+    before = threading.active_count()
+    with _scripted_server(bodies) as (_server, base, state):
+        code = _run(_gold_args(base, gold_path))
+        out, err = capsys.readouterr()
+
+    assert code == 0
+    assert err == ""
+    data = _last_line(out)
+    assert data["gold_fields"] == len(gold_doc["fields"])
+    assert data["matched"] == data["gold_fields"]
+    assert data["recall"] == 1.0
+    assert data["precision"] == 1.0
+    assert data["recall_num"] == data["recall_den"] == data["gold_fields"]
+    assert data["missed"] == 0 and data["spurious"] == 0
+    assert data["unexpected_ambiguous"] == 0
+    assert data["selected_ok_under_convention"] + data["selected_ambiguous_expected"] == data["selected_ok"]
+    assert data["calls"] == len(gold_doc["tabs"])
+    assert data["per_tag"]
+    assert sum(t["gold"] for t in data["per_tag"].values()) == data["gold_fields"]
+    assert state["index"] == len(gold_doc["tabs"])
+    assert _wait_idle(before) == before
+
+
+def test_gold_mode_mutation_lowers_recall(gold_dir, capsys):
+    gold_path, gold_doc = gold_dir
+    kept = sum(
+        len(range(0, sum(1 for f in gold_doc["fields"] if f["tab"] == tab), 2))
+        for tab in gold_doc["tabs"]
+    )
+    bodies = _gold_payloads(gold_path, gold_doc, keep=lambda i: i % 2 == 0)
+    with _scripted_server(bodies) as (_server, base, _state):
+        code = _run(_gold_args(base, gold_path))
+        out, _err = capsys.readouterr()
+
+    total = len(gold_doc["fields"])
+    assert code == 0
+    data = _last_line(out)
+    assert data["matched"] == kept
+    assert data["missed"] == total - kept
+    assert data["recall_num"] == kept
+    assert data["recall_den"] == total
+    assert data["recall"] == round(kept / total, 6)
+
+
+def test_gold_mode_output_is_numbers_only(gold_dir, capsys):
+    gold_path, gold_doc = gold_dir
+    bodies = _gold_payloads(gold_path, gold_doc)
+    with _scripted_server(bodies) as (_server, base, _state):
+        code = _run(_gold_args(base, gold_path))
+        out, _err = capsys.readouterr()
+
+    assert code == 0
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    data = json.loads(lines[0])
+    for key, value in data.items():
+        if key in ("per_tag", "finish_reason_class_counts"):
+            for inner in value.values():
+                assert isinstance(inner, (int, dict))
+            continue
+        _assert_scalar(value)
+    # no gold cell text or tab name survives into the output
+    secrets = {c["text"] for c in gold_doc["cells"]} | set(gold_doc["tabs"])
+    for secret in secrets:
+        assert secret not in out
+
+
+def test_gold_mode_key_never_appears_in_output(gold_dir, capsys, monkeypatch):
+    gold_path, gold_doc = gold_dir
+    key = "test-key-not-real"
+    monkeypatch.setenv("PROBE_TEST_KEY", key)
+    bodies = _gold_payloads(gold_path, gold_doc)
+    args = _gold_args("", gold_path)
+    args[args.index("--env-var") + 1] = "PROBE_TEST_KEY"
+    with _scripted_server(bodies, key=key) as (_server, base, _state):
+        args[args.index("--base-url") + 1] = base
+        code = _run(args)
+        out, err = capsys.readouterr()
+
+    assert code == 0
+    assert key not in out
+    assert key not in err
+
+
+def test_gold_mode_401_body_echo_is_redacted(gold_dir, capsys, monkeypatch):
+    gold_path, gold_doc = gold_dir
+    key = "test-key-not-real"
+    monkeypatch.setenv("PROBE_TEST_KEY", key)
+    bodies = _gold_payloads(gold_path, gold_doc)
+    args = _gold_args("", gold_path)
+    args[args.index("--env-var") + 1] = "PROBE_TEST_KEY"
+    with _scripted_server(bodies, key=key) as (_server, base, state):
+        args[args.index("--base-url") + 1] = base + "/e401"
+        code = _run(args)
+        out, err = capsys.readouterr()
+
+    assert code == 0
+    assert key not in out
+    assert key not in err
+    data = _last_line(out)
+    assert data["http_error_class"] == "4xx"
+    assert data["matched"] == 0
+    assert state["counts"].get("e401") == len(gold_doc["tabs"])
+
+
+def test_gold_mode_manifest_mismatch_exits_two(gold_dir, tmp_path, capsys):
+    import shutil
+
+    gold_path, gold_doc = gold_dir
+    copy = tmp_path / "gold"
+    shutil.copytree(gold_path, copy)
+    manifest_path = next(copy.glob("gold_manifest_*.json"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first_tab = gold_doc["tabs"][0]
+    manifest["tab_sha256"][first_tab] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    bodies = _gold_payloads(gold_path, gold_doc)
+    with _scripted_server(bodies) as (_server, base, _state):
+        code = _run(_gold_args(base, copy))
+        out, err = capsys.readouterr()
+
+    assert code == 2
+    assert out == ""
+    assert "sha256" in err
+    assert first_tab not in err
+
+
+def test_gold_mode_writes_record_only_when_asked(gold_dir, tmp_path, capsys):
+    gold_path, gold_doc = gold_dir
+    bodies = _gold_payloads(gold_path, gold_doc)
+    with _scripted_server(bodies) as (_server, base, _state):
+        assert _run(_gold_args(base, gold_path)) == 0
+        capsys.readouterr()
+    assert list(tmp_path.glob("*.json")) == []
+
+    out_path = tmp_path / "record.json"
+    with _scripted_server(bodies) as (_server, base, _state):
+        assert _run(_gold_args(base, gold_path, "--record-out", str(out_path))) == 0
+        capsys.readouterr()
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert len(payload["fields"]) == len(gold_doc["fields"])
+    assert {f["tab"] for f in payload["fields"]} == set(gold_doc["tabs"])

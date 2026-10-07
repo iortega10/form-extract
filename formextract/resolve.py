@@ -657,6 +657,10 @@ def author_drafts(
         for draft in chunk_drafts:
             if draft.provenance is not None:
                 draft.provenance.llm_call_ref = call_ref
+            # Carry the chunk's tab onto the draft so a field whose region_id
+            # does not resolve still knows its tab (and a declared convention
+            # matched by tab name can still apply to it).
+            draft.tab = chunk.key
             if draft.region_id and draft.region_id in region_bbox:
                 draft.bbox = region_bbox[draft.region_id]
         for reason in field_errors:
@@ -1170,7 +1174,7 @@ def drafts_to_fields(
                     continue
                 source_elements.append(band[ref.band_id][ref.segment_index])
 
-            tab = None
+            tab = draft.tab
             if region is not None:
                 if page_tabs is not None:
                     tab = page_tabs.get(page, f"page {page}")

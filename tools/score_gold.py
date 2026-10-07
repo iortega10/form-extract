@@ -55,6 +55,9 @@ COUNTER_KEYS = (
     "options_total",
     "selected_ok",
     "selected_total",
+    "selected_ok_under_convention",
+    "selected_ambiguous_expected",
+    "unexpected_ambiguous",
     "answer_ok",
     "answer_total",
     "addressed_num",
@@ -206,6 +209,12 @@ def _predicted_fields(gold: Gold, fields: list[dict]) -> tuple[list[dict], int, 
                 "answers": [
                     a for a in (field.get("answers") or ()) if isinstance(a, str)
                 ],
+                # A predicted field that carries an ambiguity could not be
+                # decided by the resolver (a between-marker without a declared,
+                # applicable convention). On a gold `expected_ambiguous` field
+                # that is the by-design outcome; anywhere else it is the signal
+                # that a convention was not declared or could not apply.
+                "ambiguous": field.get("ambiguity") is not None,
             }
         )
     return predicted, stray, unresolved
@@ -259,13 +268,25 @@ def _subscore(gold_fields: list[dict], predicted: list[dict], cited: set[str]) -
     options_ok = sum(1 for p, g in matched if p["option_texts"] == g["option_texts"])
     selected_total = 0
     selected_ok = 0
+    selected_ok_under_convention = 0
+    selected_ambiguous_expected = 0
+    unexpected_ambiguous = 0
     answer_total = 0
     answer_ok = 0
     for p, g in matched:
         if g["kind"] in ("single", "multi", "bool"):
             selected_total += 1
-            if g["expected_ambiguous"] or p["selected_texts"] == g["selected_texts"]:
+            if g["expected_ambiguous"]:
+                # Ambiguity is the designed outcome here; do not penalise it.
                 selected_ok += 1
+                selected_ambiguous_expected += 1
+            elif p["ambiguous"]:
+                # The resolver could not decide a field that should be
+                # decidable: the convention was not declared or did not apply.
+                unexpected_ambiguous += 1
+            elif p["selected_texts"] == g["selected_texts"]:
+                selected_ok += 1
+                selected_ok_under_convention += 1
         if g["kind"] == "text":
             answer_total += 1
             joined = " ".join(p["answers"])
@@ -292,6 +313,9 @@ def _subscore(gold_fields: list[dict], predicted: list[dict], cited: set[str]) -
         "options_total": matched_n,
         "selected_ok": selected_ok,
         "selected_total": selected_total,
+        "selected_ok_under_convention": selected_ok_under_convention,
+        "selected_ambiguous_expected": selected_ambiguous_expected,
+        "unexpected_ambiguous": unexpected_ambiguous,
         "answer_ok": answer_ok,
         "answer_total": answer_total,
         "addressed_num": addressed_num,
@@ -385,6 +409,9 @@ def format_text(result: dict) -> str:
         f"options_ok {o['options_ok']}/{o['options_total']} "
         f"selected_ok {o['selected_ok']}/{o['selected_total']} "
         f"answer_ok {o['answer_ok']}/{o['answer_total']}",
+        f"selected_ok_under_convention {o['selected_ok_under_convention']} "
+        f"selected_ambiguous_expected {o['selected_ambiguous_expected']} "
+        f"unexpected_ambiguous {o['unexpected_ambiguous']}",
         f"addressed {_frac(o['addressed_num'], o['addressed_den'], o['addressed'])} "
         "(perception)",
     ]
@@ -402,7 +429,9 @@ def format_text(result: dict) -> str:
             f"precision {_frac(t['precision_num'], t['precision_den'], t['precision'])} "
             f"recall {_frac(t['recall_num'], t['recall_den'], t['recall'])} "
             f"missed {t['missed']} spurious {t['spurious']} "
-            f"merge {t['merge_count']} split {t['split_count']}{mark}"
+            f"merge {t['merge_count']} split {t['split_count']} "
+            f"selected_ok {t['selected_ok']}/{t['selected_total']} "
+            f"unexpected_ambiguous {t['unexpected_ambiguous']}{mark}"
         )
     return "\n".join(lines)
 
