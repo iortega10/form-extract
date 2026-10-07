@@ -423,6 +423,25 @@ line of numbers: the scorer's headline counters (plus per-tag `matched`/`gold`)
 and the probe's usual cost keys. `--record-out PATH` writes the combined record
 dump only when asked.
 
+`--contract lines` measures the same gold set under the 0.6.0 row-lines contract
+(`PipelineConfig.output_contract`, default `"json"`), and `--prompt-variant NAME`
+picks that contract's prompt:
+
+```console
+python tools/live_probe.py --gold gold --provider gemini --model gemini-2.5-flash-lite \
+    --contract lines --prompt-variant fix2
+```
+
+`base` is the default and the prompt 0.6.0-L1b shipped; `fix1`, `fix2` and
+`fix2_notags` are experimental candidates written from the failures a live dev
+run exposed, and they stay experimental until the owner reads their numbers. The
+name is printed as `"prompt_variant"` in the output (the single-tab mode prints
+it too, but measures the json prompt, which has no variants) and is part of the
+run's cache key. The tuning rule: a variant is tuned on the dev gold only, a
+frozen variant is run once on the held-out set and those numbers are never fed
+back, and a revision is a new name rather than an edit to a variant that has
+held-out numbers.
+
 ```console
 python tools/score_gold.py --gold gold/gold_dev.json --record record.json --json
 ```

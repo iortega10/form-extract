@@ -13,7 +13,10 @@ Usage:
     python tools/live_probe.py <path.xlsx> --provider openai --model gpt-4o-mini
         [--base-url URL] [--env-var NAME] [--param k=v ...] [--tab N]
         [--repeat K] [--max-tokens N] [--workers N] [--no-temperature]
-        [--tiny] [--dump PATH]
+        [--tiny] [--dump PATH] [--prompt-variant NAME]
+    python tools/live_probe.py --gold DIR --provider openai --model gpt-4o-mini
+        [--contract json|lines] [--prompt-variant NAME] [--workers N]
+        [--record-out PATH]
 """
 from __future__ import annotations
 
@@ -40,7 +43,7 @@ from formextract.coverage import compute_coverage
 from formextract.ingest import ingest
 from formextract.layout import analyze
 from formextract.model import to_dict
-from formextract.pipeline import Pipeline, PipelineConfig, page_tabs_for
+from formextract.pipeline import PROMPT_VARIANTS, Pipeline, PipelineConfig, page_tabs_for
 from formextract.resolve import (
     LLMResponse,
     ProjectionChunk,
@@ -94,10 +97,10 @@ _AGG_SUFFIXES = ("_min", "_median", "_max", "_count")
 ALLOWED_KEYS = frozenset(
     list(BASE_KEYS)
     + [key + suffix for key in BASE_KEYS for suffix in _AGG_SUFFIXES]
-    + ["repeat", "truncation_count"]
+    + ["repeat", "truncation_count", "prompt_variant"]
 )
 ALLOWED_STRING_VALUES = frozenset(
-    FINISH_CLASSES + STATUS_CLASSES + HTTP_ERROR_CLASSES
+    FINISH_CLASSES + STATUS_CLASSES + HTTP_ERROR_CLASSES + PROMPT_VARIANTS
 )
 
 
@@ -749,16 +752,17 @@ def _score_gold(gold_doc: dict, dump: dict) -> dict:
 
 def run_gold_once(
     *, gold_dir, provider, base_url, key, model, params, max_tokens, workers,
-    contract="json",
+    contract="json", prompt_variant="base",
 ) -> tuple[dict, dict, "_ProviderClient", float]:
     """Run every gold tab through the real Pipeline.
 
     A throwaway Store in a temp dir (nothing archived under the repo, the temp
     store is deleted), the gold's own conventions declared, ``workers`` as
-    ``chunk_workers`` and ``contract`` as ``output_contract`` (``json`` or
-    ``lines``, so one gold set can be measured under both). Returns ``(dump,
-    gold_doc, client, seconds)`` where ``dump`` is one record dump of every tab's
-    fields.
+    ``chunk_workers``, ``contract`` as ``output_contract`` (``json`` or
+    ``lines``, so one gold set can be measured under both) and ``prompt_variant``
+    as the lines contract's prompt variant (``base`` by default). Returns
+    ``(dump, gold_doc, client, seconds)`` where ``dump`` is one record dump of
+    every tab's fields.
     """
     gold_dir = Path(gold_dir)
     gold_doc, manifest = _load_gold_dir(gold_dir)
@@ -769,6 +773,7 @@ def run_gold_once(
         checkbox_conventions=list(gold_doc.get("checkbox_conventions") or []),
         chunk_workers=workers,
         output_contract=contract,
+        prompt_variant=prompt_variant,
     )
     client = _ProviderClient(
         provider=provider, base_url=base_url, key=key, max_tokens=max_tokens
@@ -787,13 +792,20 @@ def run_gold_once(
     return {"fields": [to_dict(field) for field in fields]}, gold_doc, client, seconds
 
 
-def _gold_output(gold_doc: dict, score: dict, client: "_ProviderClient", seconds: float) -> dict:
+def _gold_output(
+    gold_doc: dict,
+    score: dict,
+    client: "_ProviderClient",
+    seconds: float,
+    prompt_variant: str,
+) -> dict:
     o = score["overall"]
     per_tag = {
         tag: {"matched": t["matched"], "gold": t["gold_fields"]}
         for tag, t in score["per_tag"].items()
     }
     return {
+        "prompt_variant": prompt_variant,
         "gold_tabs": len(gold_doc["tabs"]),
         "calls": client.calls,
         "seconds": seconds,
@@ -846,11 +858,14 @@ def _execute_gold(args, key: str, base_url: str, params: dict[str, Any]) -> dict
         max_tokens=args.max_tokens,
         workers=args.workers,
         contract=args.contract,
+        prompt_variant=args.prompt_variant,
     )
     if args.record_out:
         with open(args.record_out, "w", encoding="utf-8") as handle:
             json.dump(dump, handle, ensure_ascii=False, indent=2)
-    return _gold_output(gold_doc, _score_gold(gold_doc, dump), client, seconds)
+    return _gold_output(
+        gold_doc, _score_gold(gold_doc, dump), client, seconds, args.prompt_variant
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +931,13 @@ def build_parser() -> argparse.ArgumentParser:
         "0.6.0 row lines",
     )
     parser.add_argument(
+        "--prompt-variant",
+        choices=PROMPT_VARIANTS,
+        default="base",
+        help="the lines contract's prompt variant (L3a); ignored by the json "
+        "contract, which has its own prompt. Printed in the numbers output.",
+    )
+    parser.add_argument(
         "--record-out",
         default=None,
         metavar="PATH",
@@ -940,7 +962,9 @@ def _execute(args, key: str, base_url: str, params: dict[str, Any]) -> dict[str,
     }
     if args.tiny:
         bases = [tiny_once(**run_kwargs) for _ in range(args.repeat)]
-        return aggregate(bases, args.repeat)
+        output = aggregate(bases, args.repeat)
+        output["prompt_variant"] = args.prompt_variant
+        return output
 
     ing = ingest(args.path)
     elements = ing.elements
@@ -985,7 +1009,11 @@ def _execute(args, key: str, base_url: str, params: dict[str, Any]) -> dict[str,
     ]
     if args.dump:
         _write_dump(args.dump, dump_entries or [])
-    return aggregate(bases, args.repeat)
+    output = aggregate(bases, args.repeat)
+    # The single-tab path measures the json prompt, which has no variants; the
+    # name is closed and printed anyway so one invocation shape reports it.
+    output["prompt_variant"] = args.prompt_variant
+    return output
 
 
 def main(argv: list[str] | None = None) -> int:

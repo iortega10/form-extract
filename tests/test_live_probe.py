@@ -871,3 +871,102 @@ def test_gold_mode_writes_record_only_when_asked(gold_dir, tmp_path, capsys):
     payload = json.loads(out_path.read_text(encoding="utf-8"))
     assert len(payload["fields"]) == len(gold_doc["fields"])
     assert {f["tab"] for f in payload["fields"]} == set(gold_doc["tabs"])
+
+
+# --------------------------------------------------------------------------
+# --prompt-variant: the L3a lines-contract prompt variants
+# --------------------------------------------------------------------------
+
+def _lines_client(gold_path, gold_doc):
+    """A provider client that answers each gold tab with its own perfect lines.
+
+    No network: the L3a variants are a prompt change, so the hermetic path can
+    only prove the name travels and the plumbing holds, never which variant is
+    better (that is the reviewer's live run).
+    """
+    import gold_lines
+
+    from formextract.resolve import LLMResponse
+
+    texts = gold_lines.GoldLines(gold_path, gold_doc).perfect()
+
+    class Stub(probe._ProviderClient):
+        """The probe's own client with its transport replaced by canned lines."""
+
+        def complete(self, prompt, *, model, params):
+            tab = prompt.split("Rows of `", 1)[1].split("`", 1)[0]
+            text = texts[tab]
+            self.calls += 1
+            self.finish_counts["stop" if text.endswith("\nend") else "length"] += 1
+            return LLMResponse(
+                text=text, model=model, params=params, tokens=1, latency_ms=0,
+                finish_reason="stop" if text.endswith("\nend") else "length",
+            )
+
+    return Stub
+
+
+def test_gold_mode_lines_contract_prints_the_prompt_variant(gold_dir, capsys, monkeypatch):
+    gold_path, gold_doc = gold_dir
+    monkeypatch.setattr(probe, "_ProviderClient", _lines_client(gold_path, gold_doc))
+    for variant in probe.PROMPT_VARIANTS:
+        code = _run(
+            _gold_args(
+                "http://example.invalid", gold_path,
+                "--contract", "lines", "--prompt-variant", variant,
+            )
+        )
+        out, err = capsys.readouterr()
+        assert code == 0, (variant, err)
+        assert err == ""
+        data = _last_line(out)
+        assert data["prompt_variant"] == variant
+        assert data["precision"] == 1.0
+        assert data["recall"] == 1.0
+        assert data["gold_fields"] == len(gold_doc["fields"])
+        for value in data.values():
+            if not isinstance(value, dict):
+                _assert_scalar(value)
+    # the default is `base`, named in the output like any other
+    code = _run(_gold_args("http://example.invalid", gold_path, "--contract", "lines"))
+    out, _err = capsys.readouterr()
+    assert code == 0
+    assert _last_line(out)["prompt_variant"] == "base"
+
+
+def test_gold_mode_rejects_an_unknown_prompt_variant(gold_dir, capsys):
+    gold_path, _gold_doc = gold_dir
+    code = _run(
+        _gold_args("http://example.invalid", gold_path, "--prompt-variant", "fix3")
+    )
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert out == ""
+    assert "--prompt-variant" in err
+
+
+def test_single_tab_mode_prints_the_prompt_variant(tmp_path, capsys):
+    """The single-tab path measures the json prompt; it still names the variant."""
+    path = _make_workbook(tmp_path / "wb.xlsx")
+    with _fake_server(
+        ok_body=_openai_body(OK_FIELDS, "stop"), trunc_body=b"", key=""
+    ) as (_server, base, _state):
+        code = _run(
+            [
+                str(path),
+                "--provider", "openai",
+                "--model", "test-model",
+                "--base-url", base + "/ok",
+                "--env-var", "",
+                "--prompt-variant", "fix2",
+            ]
+        )
+        out, err = capsys.readouterr()
+
+    assert code == 0
+    assert err == ""
+    data = _last_line(out)
+    assert data["prompt_variant"] == "fix2"
+    assert data["fields"] == 1
+    for value in data.values():
+        _assert_scalar(value)

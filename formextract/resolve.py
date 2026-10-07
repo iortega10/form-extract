@@ -11,7 +11,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .layout import strip_marks
 from .lines import (
@@ -377,8 +377,16 @@ def _row_tag(row, owner, anchor_column) -> str:
     return f" [{tag}]" if tag else ""
 
 
-def _project_page_rows(layout, by_id, lattice, page, tabs, non_answer_ids, page_tabs):
-    """One projection chunk for one page: a line per lattice row (section 3.1)."""
+def _project_page_rows(
+    layout, by_id, lattice, page, tabs, non_answer_ids, page_tabs, *, row_tags=True
+):
+    """One projection chunk for one page: a line per lattice row (section 3.1).
+
+    ``row_tags`` is the projection option a prompt variant may turn off (L3a):
+    with it off the ``[hdr]/[grid]/[prose]`` hint is simply not printed, and
+    nothing else about the line changes, so a ``row.seg`` coordinate means the
+    same thing under either projection.
+    """
     owner: dict[tuple[int, int], Region] = {}
     for region in layout.regions:
         if region.bbox.page != page:
@@ -400,7 +408,7 @@ def _project_page_rows(layout, by_id, lattice, page, tabs, non_answer_ids, page_
                 segments.append(f"{k}={element.text}")
         if not segments:
             continue
-        tag = _row_tag(row, owner, anchor_column)
+        tag = _row_tag(row, owner, anchor_column) if row_tags else ""
         lines.append(f"{row.index}{tag}: " + " | ".join(segments))
     if not lines:
         return None
@@ -421,6 +429,7 @@ def project_lines_chunks(
     lattices: dict[int, RowLattice] | None = None,
     non_answer_element_ids: set[str] | None = None,
     page_tabs: dict[int, str] | None = None,
+    row_tags: bool = True,
 ) -> list[ProjectionChunk]:
     """0.6.0 lines projection: one line per page-global lattice ROW.
 
@@ -430,6 +439,12 @@ def project_lines_chunks(
     chunk split; when omitted it is built here from ``layout``. No region id,
     band id or alias appears in the model-visible text - only row indices,
     segment indices and the ``[hdr]/[grid]/[prose]``/``[annotation]`` hints.
+
+    ``row_tags=False`` drops the ``[hdr]/[grid]/[prose]`` row tags (L3a's
+    ``fix2_notags`` variant): the debate's tag A/B, a projection option rather
+    than a prompt edit. Only the tag text is dropped - the row id, the segments
+    and the ``[annotation]`` segment tag are the same under both projections, so
+    a response written against one is valid against the other.
     """
     non_answer_ids = set(non_answer_element_ids or ())
     by_id = {e.element_id: e for e in elements}
@@ -446,6 +461,7 @@ def project_lines_chunks(
             tabs,
             non_answer_ids,
             page_tabs,
+            row_tags=row_tags,
         )
         if chunk is not None:
             chunks.append(chunk)
@@ -459,8 +475,8 @@ def project_lines_chunks(
     return chunks
 
 
-def build_lines_prompt(chunk: ProjectionChunk) -> str:
-    """The prompt for the lines contract (sections 3.2-3.4), versioned by PROMPT_VERSION.
+def _lines_prompt_base(chunk: ProjectionChunk) -> str:
+    """The ``base`` variant: today's prompt, byte for byte (sections 3.2-3.4).
 
     Kept short on purpose: it is input tokens on every call. The worked examples
     use invented vocabulary unrelated to the gold fixtures.
@@ -503,6 +519,139 @@ def build_lines_prompt(chunk: ProjectionChunk) -> str:
         "Finish with the single line `end`.\n\n"
         f"Rows of `{chunk.key}`:\n{chunk.text}"
     )
+
+
+#: The worked examples ``fix2`` adds for the structures the reviewer measured at
+#: zero on the dev gold. Invented cells only: no example line is a line of the
+#: gold's canned perfect responses, and no word here is in a dev or held-out gold
+#: word list (a test asserts both against gold built in a temp dir).
+_LINES_FIX2_WORKED_EXAMPLES = (
+    "The shapes that scored zero (invented rows):\n"
+    "- stacked: the label alone on its row, one option cell per row below it, "
+    "ONE `O=` comma list:\n"
+    "  multi L=30.0 O=31.0,32.0,33.0\n"
+    "- two-row label with a typed answer:\n"
+    "  text L=1.0,2.0 A=1.2\n"
+    "- grid: the label row is the field's own row, never a `hdr` line:\n"
+    "  multi L=20.0 O=21.0-9,22.0-9\n"
+    "- matrix: the options are the HEADER cells far above:\n"
+    "  single L=9.0 O=3.1,3.2 A=9.1\n"
+    "- side by side: two fields, TWO lines:\n"
+    "  single L=40.0 O=40.2,40.4\n"
+    "  single L=40.5 O=40.7,40.9\n"
+)
+
+
+def _lines_prompt_fix_body(chunk: ProjectionChunk, worked_examples: str) -> str:
+    """``fix1``/``fix2``: the base rules retargeted at the observed failures.
+
+    The contaminating literal example is gone, so no string in the prompt can be
+    copied into a field (F2); the kind is tied to the ANSWER rather than the
+    label's punctuation (F6); a row is a field XOR a disposition (F3/F7); a
+    two-label row is two fields (F5); marks are never cited (F8). ``fix2`` adds
+    the worked examples for the structures that scored zero.
+    """
+    return (
+        "You bind ONE form tab. The tab is drawn as numbered ROWS; every cell in "
+        "a row is a numbered segment, written `row.seg` (segments count from 0, "
+        "left to right).\n"
+        "Write ONE line per FIELD, then a line `end`, then stop: no prose, no "
+        "JSON, no markdown fences, and never copy any cell text.\n"
+        "A line is a kind, then `key=items` groups. Kinds: `single` (one option "
+        "is chosen), `multi` (several may be chosen), `bool` (a yes/no value), "
+        "`text` (free text), `hdr` (a heading), `note` (a note), `skip` (not a "
+        "field).\n"
+        "The kind follows the ANSWER, not the label: a typed value or a number "
+        "is `text` even when the label ends in `?`; `bool` only for a yes/no "
+        "value.\n"
+        "Keys: `L=` the label cells (required, in reading order), `O=` every "
+        "option cell, `A=` the answer evidence, `N=` notes.\n"
+        "- A row is EITHER a field line or a disposition line, never both; a row "
+        "holding TWO labels is TWO fields, the second label starting a second "
+        "line on the same row.\n"
+        "- A comma JOINs cells in `L=`, `A=` and `N=` (`L=50.0,51.0`) but "
+        "SEPARATES options in `O=`; a `+` joins cells into ONE option "
+        "(`O=12.2+12.3`).\n"
+        "- `O=` lists EVERY option cell, never abbreviated. `a.b-c` is a "
+        "within-row span, one option per cell: `multi L=14.0 O=14.1-12`.\n"
+        "- No cross-row ranges; a control stacked down rows is ONE comma list of "
+        "the option cells below its label.\n"
+        "- Marks (`X`, a tick) are decided by the resolver: never cite a mark "
+        "cell in `L=`, `O=` or `A=`, and give `A=` only where no mark decides (a "
+        "typed value, a bold or coloured option, or a `text` value cell).\n"
+        "- `N=` is a note that belongs to the field.\n"
+        "- A quoted literal may stand for one cell holding several options; it "
+        "is allowed under `O=` or `N=` only.\n"
+        "- A row that is not a field is `hdr L=3.0`, `note L=5.0` or "
+        "`skip L=6.0`.\n"
+        + worked_examples
+        + "Examples (invented rows):\n"
+        "  single L=12.0 O=12.2,12.4\n"
+        "  multi L=14.0 O=14.1-12\n"
+        "  multi L=20.0 N=19.0 O=21.0-9,22.0-9\n"
+        "  single L=40.0 O=40.2,40.4\n"
+        "  single L=40.5 O=40.7,40.9\n"
+        "  text L=50.0,51.0 A=50.2\n"
+        "Finish with the single line `end`.\n\n"
+        f"Rows of `{chunk.key}`:\n{chunk.text}"
+    )
+
+
+def _lines_prompt_fix1(chunk: ProjectionChunk) -> str:
+    """The ``fix1`` variant: targeted wording and no worked examples."""
+    return _lines_prompt_fix_body(chunk, "")
+
+
+def _lines_prompt_fix2(chunk: ProjectionChunk) -> str:
+    """``fix2``: ``fix1`` plus worked examples for the shapes that scored zero."""
+    return _lines_prompt_fix_body(chunk, _LINES_FIX2_WORKED_EXAMPLES)
+
+
+#: The lines-contract prompt variants, by name. This is the closed vocabulary
+#: ``PipelineConfig.prompt_variant`` is validated against, and every value is a
+#: PURE function of the chunk it is handed: no clock, no counter, no module
+#: state, so two calls with the same chunk are byte-identical. ``base`` is
+#: today's prompt byte for byte; the others are this turn's experiments, tuned on
+#: the dev gold set only, and a revision is always a NEW name (a variant that has
+#: held-out numbers is frozen).
+LINES_PROMPT_VARIANTS: dict[str, Callable[[ProjectionChunk], str]] = {
+    "base": _lines_prompt_base,
+    "fix1": _lines_prompt_fix1,
+    "fix2": _lines_prompt_fix2,
+    "fix2_notags": _lines_prompt_fix2,
+}
+
+#: The projection option each variant needs. ``fix2_notags`` is ``fix2``'s text
+#: over a tag-free projection (the debate's tag A/B), so its prompt function is
+#: ``fix2``'s; every other variant projects with the row tags on.
+LINES_VARIANT_ROW_TAGS: dict[str, bool] = {
+    "base": True,
+    "fix1": True,
+    "fix2": True,
+    "fix2_notags": False,
+}
+
+
+def lines_variant_row_tags(variant: str) -> bool:
+    """Whether the projection prints ``[hdr]/[grid]/[prose]`` for ``variant``."""
+    return LINES_VARIANT_ROW_TAGS[variant]
+
+
+def build_lines_prompt(chunk: ProjectionChunk, variant: str = "base") -> str:
+    """The prompt for the lines contract, in the named variant (sections 3.2-3.4).
+
+    ``base`` is the 0.6.0-L1b prompt byte for byte, so the default path is
+    unchanged and ``PROMPT_VERSION`` is not bumped by adding variants. The
+    variant is part of the call-cache key through this text and part of the
+    instance key through ``PipelineConfig.prompt_variant``, so a name always
+    travels with the response it produced.
+    """
+    if variant not in LINES_PROMPT_VARIANTS:
+        raise ValueError(
+            f"prompt_variant must be one of {tuple(LINES_PROMPT_VARIANTS)!r}, "
+            f"got {variant!r}"
+        )
+    return LINES_PROMPT_VARIANTS[variant](chunk)
 
 
 def _resolve_ref(lattice, ref: SegmentRef) -> tuple[str, int, int] | None:
@@ -1056,6 +1205,7 @@ def author_drafts(
     include_address: bool = False,
     force: bool = False,
     output_contract: str = "json",
+    prompt_variant: str = "base",
     layout: LayoutResult | None = None,
     elements_by_id: dict[str, Element] | None = None,
     non_answer_element_ids: set[str] | None = None,
@@ -1188,7 +1338,7 @@ def author_drafts(
             )
             return chunk_drafts, chunk_calls, chunk_errors, chunk_dispositions
 
-        prompt = build_lines_prompt(chunk)
+        prompt = build_lines_prompt(chunk, prompt_variant)
         response, calls, transport_error, fresh = resolve_prompt(
             prompt, _lines_response_ok
         )

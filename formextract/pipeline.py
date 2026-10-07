@@ -29,12 +29,14 @@ from .model import (
     TabCoverage,
 )
 from .resolve import (
+    LINES_PROMPT_VARIANTS,
     LLMClient,
     PROMPT_VERSION,
     ResolutionError,
     author_drafts,
     drafts_resolve_cleanly,
     drafts_to_fields,
+    lines_variant_row_tags,
     project_chunks,
     project_lines_chunks,
     remap_drafts_for_page,
@@ -131,6 +133,32 @@ def validate_output_contract(value) -> None:
         raise ValueError(
             f"output_contract must be one of {OUTPUT_CONTRACTS!r}, got {value!r}"
         )
+
+
+#: The lines-contract prompt variants a run may name (L3a). ``base`` is the
+#: 0.6.0-L1b prompt byte for byte and stays the default; the others are
+#: experimental until the owner reads the live gold numbers for them, and the
+#: json contract ignores the field entirely (it has its own prompt).
+PROMPT_VARIANTS = tuple(LINES_PROMPT_VARIANTS)
+
+
+def validate_prompt_variant(value) -> None:
+    """Raise ValueError unless `prompt_variant` is a registered prompt variant."""
+    if value not in PROMPT_VARIANTS:
+        raise ValueError(
+            f"prompt_variant must be one of {PROMPT_VARIANTS!r}, got {value!r}"
+        )
+
+
+def _prompt_variant_token(prompt_variant: str) -> str:
+    """The one canonical cache-key token for a non-default prompt variant.
+
+    Empty for ``base``, so every default-config key stays byte-identical to
+    0.6.0-L1b's (and to 0.5.0's). The variant ALSO changes the prompt text, so
+    the call cache would miss anyway; the token is what makes the INSTANCE key
+    miss, so a toggled variant can never serve a stale instance.
+    """
+    return "" if prompt_variant == "base" else f"variant={prompt_variant}"
 
 
 def _normalize_checkbox_conventions(selectors) -> list[CheckboxConvention]:
@@ -267,6 +295,7 @@ def compute_cache_key(
     include_address: bool = False,
     min_coverage: float | None = None,
     output_contract: str = "json",
+    prompt_variant: str = "base",
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
@@ -301,6 +330,11 @@ def compute_cache_key(
     contract_token = output_contract if isinstance(output_contract, str) else repr(output_contract)
     if contract_token != "json":
         parts.append(f"contract={contract_token}")
+    # One canonical token whenever the lines prompt's variant is not the default,
+    # so a toggled variant can never serve an instance authored by another one.
+    variant_token = _prompt_variant_token(prompt_variant)
+    if variant_token:
+        parts.append(variant_token)
     joined = "|".join(parts)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
@@ -361,7 +395,13 @@ class PipelineConfig:
     ``"json"``, the 0.5.0 contract) selects what the model writes: ``"json"``
     keeps the prompt and projection byte-identical to 0.5.0, ``"lines"`` uses
     the row-indexed line grammar (no repair call; see ``resolve``). It is
-    appended to the cache key whenever it is not ``"json"``.
+    appended to the cache key whenever it is not ``"json"``. ``prompt_variant``
+    (default ``"base"``, one of ``PROMPT_VARIANTS``) selects the lines contract's
+    prompt and, for ``"fix2_notags"``, its projection (the row tags off):
+    ``"base"`` is the 0.6.0-L1b prompt byte for byte and the other names are
+    experiments measured with ``live_probe.py --gold --prompt-variant``. The json
+    contract ignores the field; it is appended to the cache key whenever it is
+    not ``"base"``.
     """
 
     model: str = "gpt-4o-mini"
@@ -375,6 +415,7 @@ class PipelineConfig:
     chunk_workers: int = 1
     min_coverage: float | None = None
     output_contract: str = "json"
+    prompt_variant: str = "base"
 
 
 class Pipeline:
@@ -391,6 +432,7 @@ class Pipeline:
         validate_chunk_workers(self.config.chunk_workers)
         validate_min_coverage(self.config.min_coverage)
         validate_output_contract(self.config.output_contract)
+        validate_prompt_variant(self.config.prompt_variant)
         self._checkbox_conventions = _normalize_checkbox_conventions(
             self.config.checkbox_conventions
         )
@@ -442,6 +484,7 @@ class Pipeline:
                 include_address=self.config.include_address,
                 force=force,
                 output_contract=self.config.output_contract,
+                prompt_variant=self.config.prompt_variant,
                 layout=layout,
                 elements_by_id=elements_by_id,
                 non_answer_element_ids=non_answer_ids,
@@ -540,6 +583,7 @@ class Pipeline:
             include_address=self.config.include_address,
             min_coverage=self.config.min_coverage,
             output_contract=self.config.output_contract,
+            prompt_variant=self.config.prompt_variant,
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -622,6 +666,7 @@ class Pipeline:
                         tabs,
                         non_answer_element_ids=non_answer_ids,
                         page_tabs=page_tabs,
+                        row_tags=lines_variant_row_tags(self.config.prompt_variant),
                     )
                 else:
                     chunks = project_chunks(
@@ -661,6 +706,7 @@ class Pipeline:
                             include_address=self.config.include_address,
                             force=force,
                             output_contract=self.config.output_contract,
+                            prompt_variant=self.config.prompt_variant,
                             layout=layout,
                             elements_by_id=elements_by_id,
                             non_answer_element_ids=non_answer_ids,

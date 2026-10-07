@@ -179,6 +179,31 @@ single schema version bump per output-changing release.
   cut into a dropped tail and a PARTIAL run, an empty response) are pinned.
   `tools/live_probe.py --gold DIR --contract {json,lines}` (default `json`)
   lets the reviewer measure both contracts on one gold set under one version.
+- **The lines contract's prompt variants (L3a).** `resolve.LINES_PROMPT_VARIANTS`
+  is a closed registry of prompt functions, one per name: `base` (the
+  0.6.0-L1b prompt byte for byte, so `PROMPT_VERSION` and `PIPELINE_VERSION`
+  stay `"4"` and no cached run is invalidated), `fix1` (targeted wording written
+  from the failures a live dev run exposed: the kind follows the ANSWER rather
+  than the label's punctuation, a row is a field XOR a disposition, a two-label
+  row is two fields, marks are never cited in `L=`/`O=`/`A=`, and the one quoted
+  literal the model copied into a field is gone), `fix2` (`fix1` plus worked
+  examples for the structures that scored zero: a stacked multi-select, a
+  two-row label with a typed answer, a grid, a shared-header matrix row and a
+  side-by-side pair) and `fix2_notags` (`fix2`'s text over a projection with the
+  row tags off -- the debate's tag A/B, a projection option rather than a prompt
+  edit). `build_lines_prompt(chunk, variant="base")` dispatches to the registry;
+  `PipelineConfig.prompt_variant` (default `"base"`) is validated against it,
+  threaded into authoring for the lines contract only (the json contract has its
+  own prompt and ignores it) and appended to the cache key as one
+  `variant=<name>` token whenever it is not `"base"`. Every variant is at most
+  45% longer than `base`, its example lines parse with no line error, no
+  sentinel ref and no review flag, and no example line is a gold canned line nor
+  shares a word with a dev or held-out gold word list (the generator's own pools
+  are read, so the held-out set stays unseen). `tools/live_probe.py --gold DIR
+  --contract lines --prompt-variant NAME` runs one variant and prints the closed
+  name as `prompt_variant`. The variants are candidates, not conclusions: `base`
+  stays the default, the reviewer measures each live, and a revision is a new
+  name rather than an edit to a variant that has held-out numbers.
 
 ### Known issues
 
