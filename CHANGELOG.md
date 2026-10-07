@@ -8,6 +8,20 @@ single schema version bump per output-changing release.
 
 ### Added
 
+- **Row lattice, a derived view (`formextract/rows.py`).** A page-global lattice
+  over the existing layout bands, the coordinate the 0.6.0 line contract will
+  cite cells by (`row.seg`). `build_rows(layout, elements_by_id, *, page)` groups
+  the page's **short** bands (height <= `SHORT_BAND_FACTOR` (1.5) x the median
+  band height) into rows by their top edge, then assigns every tall band by its
+  top edge — a band above/below every row makes a leading/trailing row, a top
+  edge in a gap goes to the smaller row index — so a tall merged label lands on
+  its top row without fusing two rows. Each row exposes its `(column, band_id)`
+  entries (column x-order) and its element ids in segment order, plus
+  `row_of_element`, `segment` and `ref_for` (a segment translated back to today's
+  `(region_id, band_id, segment_index)`). It is a frozen view: never attached to
+  a `LayoutResult`, never added to an `InstanceRecord`, never serialised. layout,
+  the projection, the prompt and every existing record byte are unchanged;
+  `layout.py` is untouched.
 - **Live provider probe (`tools/live_probe.py`).** A stdlib-only,
   out-of-package tool that measures one provider call per projection chunk on a
   real workbook (OpenAI-compatible or Gemini) and prints one JSON line of
