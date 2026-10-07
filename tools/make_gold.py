@@ -1,0 +1,1195 @@
+#!/usr/bin/env python3
+"""Synthetic gold-set generator for the 0.6.0 line-contract work (turn G).
+
+Openpyxl only: this module must never import ``formextract`` (a test asserts
+that), so ground truth is a property of the workbook cells and of nothing else.
+Gold is keyed by the xlsx element ids the ingest emits, ``<sheet>!<row>:<col>``
+(verified against ``formextract/ingest/xlsx.py``), so it is independent of
+bands, regions, layout and any model.
+
+Deterministic: the same ``--seed`` and ``--set`` produce byte-identical .xlsx
+files and gold JSON. openpyxl stamps ``docProps/core.xml`` with the wall clock
+and the zip entries with mtime, so the workbook is written to a buffer, the
+clock fields are pinned and the archive is repacked with fixed metadata.
+
+Writes one ``.xlsx`` per tab, one gold JSON and one manifest per set, and (with
+``--canned``) perfect + mutated record dumps with their expected counter moves.
+
+Usage::
+
+    python tools/make_gold.py --set dev --seed 20260101 --out DIR
+    python tools/make_gold.py --set dev --seed 20260101 --out DIR --canned DIR/canned
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import random
+import re
+import zipfile
+from pathlib import Path
+
+import openpyxl
+from openpyxl.styles import Font, PatternFill
+
+GOLD_VERSION = 1
+
+#: The clock is pinned so regeneration is byte-identical; the zip is repacked
+#: with a fixed date_time so openpyxl's mtime never leaks into the bytes.
+_FIXED_TS = (1980, 1, 1, 0, 0, 0)
+_CREATED = b'<dcterms:created xsi:type="dcterms:W3CDTF">2026-01-01T00:00:00Z</dcterms:created>'
+_MODIFIED = b'<dcterms:modified xsi:type="dcterms:W3CDTF">2026-01-01T00:00:00Z</dcterms:modified>'
+
+#: The closed structure-tag vocabulary. Field tags carry at least one per gold
+#: field; the three disposition tags belong to gold dispositions instead.
+FIELD_TAGS = (
+    "yes_no_row",
+    "dense_multi",
+    "stacked_multi",
+    "side_by_side",
+    "label_two_rows",
+    "label_two_cells",
+    "text_field",
+    "typed_value",
+    "no_glyph_answer",
+    "grid_50",
+    "matrix",
+    "merged_tall",
+    "gutter_column",
+    "non_answer_column",
+)
+DISPOSITION_TAGS = ("header_row", "note_row", "skip_row")
+#: Gold dispositions are stored by their line kind; the tags above name them.
+DISPOSITION_TAG_VALUE = {"header_row": "hdr", "note_row": "note", "skip_row": "skip"}
+TAGS = FIELD_TAGS + DISPOSITION_TAGS
+
+#: Two disjoint word pools. Every label and option string is built only from
+#: its own pool, so the dev and held-out vocabularies share no label or option
+#: string (a test asserts the intersection is empty). No pool word is a tag.
+VOCAB = {
+    "dev": {
+        "verb": [
+            "inspect", "calibrate", "lubricate", "torque", "stencil",
+            "anodize", "deburr", "etch", "sweep", "purge",
+        ],
+        "noun": [
+            "grommet", "spindle", "flange", "gasket", "bracket", "ratchet",
+            "cogwheel", "pulley", "toggle", "latch", "bushing", "shim",
+            "ferrule", "clevis", "gudgeon", "trunnion",
+        ],
+        "adj": [
+            "upper", "lower", "inner", "outer", "forward", "aft", "port",
+            "starboard",
+        ],
+        "yesno": ("Affirm", "Dissent"),
+        "typed": ("Recorded", "Waived"),
+    },
+    "heldout": {
+        "verb": [
+            "survey", "fettle", "wrangle", "chamfer", "sinter", "quench",
+            "braze", "ream", "swage", "hob",
+        ],
+        "noun": [
+            "zephyr", "quokka", "nimbus", "vellum", "cinder", "tessera",
+            "gossamer", "plinth", "kershaw", "lumen", "marlin", "onyx",
+            "pumice", "quill", "sable", "tallow",
+        ],
+        "adj": [
+            "dorsal", "ventral", "keystone", "primeval", "vermilion",
+            "cerulean", "saffron", "gilded",
+        ],
+        "yesno": ("Conform", "Rebuff"),
+        "typed": ("Noted", "Forborne"),
+    },
+}
+
+MARKER = "X"
+_FILL = "FFEEDD"
+
+#: Per-set default seeds. Held-out is a different seed AND a different
+#: vocabulary so prompts tuned on dev cannot memorise the held-out fixtures.
+DEFAULT_SEEDS = {"dev": 20260101, "heldout": 20260202}
+
+_KIND_TO_CONTROL = {
+    "single": "single_select",
+    "multi": "multi_select",
+    "bool": "bool",
+    "text": "text",
+}
+_CONTROL_TO_KIND = {v: k for k, v in _KIND_TO_CONTROL.items()}
+
+
+def _distinct(rng: random.Random, k: int, make) -> list[str]:
+    """`k` distinct strings from `make(rng)`, in draw order (deterministic)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    while len(out) < k:
+        value = make(rng)
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+class Words:
+    """Deterministic text builder for one tab."""
+
+    def __init__(self, pool: dict, rng: random.Random):
+        self.pool = pool
+        self.rng = rng
+
+    def label(self) -> str:
+        p, rng = self.pool, self.rng
+        return (
+            f"{rng.choice(p['verb']).capitalize()} {rng.choice(p['noun'])} "
+            f"{rng.choice(p['adj'])} {rng.choice(p['noun'])}?"
+        )
+
+    def options(self, k: int) -> list[str]:
+        p, rng = self.pool, self.rng
+        return _distinct(
+            rng, k, lambda r: f"{r.choice(p['adj']).capitalize()} {r.choice(p['noun'])}"
+        )
+
+    def yesno(self) -> tuple[str, str]:
+        return self.pool["yesno"]
+
+    def text_value(self) -> str:
+        p, rng = self.pool, self.rng
+        return f"{rng.choice(p['noun']).capitalize()} {rng.choice(p['adj'])} {rng.randint(100, 999)}"
+
+    def typed_value(self) -> str:
+        return self.rng.choice(self.pool["typed"])
+
+    def annotation(self) -> str:
+        p, rng = self.pool, self.rng
+        return f"see {rng.choice(p['noun'])} {rng.choice(p['adj'])} appendix"
+
+    def header(self) -> str:
+        p, rng = self.pool, self.rng
+        return f"{rng.choice(p['noun']).capitalize()} {rng.choice(p['noun']).capitalize()} Intake"
+
+    def note(self) -> str:
+        p, rng = self.pool, self.rng
+        return f"{rng.choice(p['adj']).capitalize()} {rng.choice(p['noun'])} value unclear"
+
+    def skip(self) -> str:
+        p, rng = self.pool, self.rng
+        return f"{rng.choice(p['noun']).capitalize()} legend"
+
+
+class Sheet:
+    """One tab: writes cells and accumulates gold cells, fields, dispositions."""
+
+    def __init__(self, ws, words: Words):
+        self.ws = ws
+        self.name = ws.title
+        self.words = words
+        self.cells: list[dict] = []
+        self.fields: list[dict] = []
+        self.dispositions: list[dict] = []
+        self._field_n = 0
+
+    def put(self, row: int, col: int, text: str, role: str, *, bold=False, fill=False) -> str:
+        cell = self.ws.cell(row=row, column=col, value=text)
+        if bold:
+            cell.font = Font(bold=True)
+        if fill:
+            cell.fill = PatternFill(fill_type="solid", start_color=_FILL, end_color=_FILL)
+        cid = f"{self.name}!{row}:{col}"
+        self.cells.append({"id": cid, "tab": self.name, "text": str(text), "role": role})
+        return cid
+
+    def dispose(self, row: int, col: int, text: str, kind: str) -> str:
+        cid = self.put(row, col, text, kind)
+        self.dispositions.append({"tab": self.name, "cell": cid, "disposition": kind})
+        return cid
+
+    def field(
+        self,
+        *,
+        kind: str,
+        label_cells,
+        option_cells=(),
+        answer_cells=(),
+        annotation_cells=(),
+        selected_option_cells=(),
+        answer_text=None,
+        tags=(),
+        expected_ambiguous=False,
+    ) -> str:
+        self._field_n += 1
+        fid = f"{self.name}!f{self._field_n}"
+        self.fields.append(
+            {
+                "field_id_gold": fid,
+                "tab": self.name,
+                "kind": kind,
+                "label_cells": list(label_cells),
+                "option_cells": list(option_cells),
+                "answer_cells": list(answer_cells),
+                "annotation_cells": list(annotation_cells),
+                "selected_option_cells": list(selected_option_cells),
+                "answer_text": answer_text,
+                "tags": list(tags),
+                "expected_ambiguous": bool(expected_ambiguous),
+            }
+        )
+        return fid
+
+
+def _put_options(sheet: Sheet, row: int, c0: int, options) -> tuple[list[str], list[str]]:
+    """Write (marker?, option) column pairs. Returns (option_ids, selected_ids)."""
+    option_ids: list[str] = []
+    selected: list[str] = []
+    col = c0
+    for text, is_sel in options:
+        if is_sel:
+            sheet.put(row, col, MARKER, "marker")
+        col += 1
+        oid = sheet.put(row, col, text, "option")
+        option_ids.append(oid)
+        if is_sel:
+            selected.append(oid)
+        col += 1
+    return option_ids, selected
+
+
+# --------------------------------------------------------------------------
+# Tab builders. Each returns nothing; it fills the Sheet with gold + cells.
+# --------------------------------------------------------------------------
+
+YES_NO_N = 14
+DENSE_N = 10
+DENSE_OPTIONS = 5
+STACKED_N = 6
+STACKED_OPTIONS = 3
+SIDE_ROWS = 7
+LTR_N = 8
+LTC_N = 11
+TEXT_N = 10
+TYPED_N = 10
+NO_GLYPH_N = 8
+GRID_N = 3
+GRID_ROWS = 5
+GRID_COLS = 10
+MATRIX_N = 6
+MERGED_N = 6
+GUTTER_N = 6
+NON_ANSWER_N = 8
+
+
+def _tab_yes_no(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(YES_NO_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        yn = s.words.yesno()
+        sel = s.words.rng.randint(0, 1)
+        opts = [(yn[0], sel == 0), (yn[1], sel == 1)]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["yes_no_row"],
+        )
+        row += 1
+    s.dispose(row, 1, s.words.note(), "note")
+    row += 1
+    s.dispose(row, 1, s.words.skip(), "skip")
+
+
+def _tab_dense(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(DENSE_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        texts = s.words.options(DENSE_OPTIONS)
+        opts = [(t, s.words.rng.random() < 0.4) for t in texts]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["dense_multi"],
+        )
+        row += 1
+    s.dispose(row, 1, s.words.note(), "note")
+    row += 1
+    s.dispose(row, 1, s.words.skip(), "skip")
+
+
+def _tab_stacked(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(STACKED_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        row += 1
+        texts = s.words.options(STACKED_OPTIONS)
+        option_ids: list[str] = []
+        selected: list[str] = []
+        for text in texts:
+            is_sel = s.words.rng.random() < 0.4
+            if is_sel:
+                s.put(row, 3, MARKER, "marker")
+            oid = s.put(row, 4, text, "option")
+            option_ids.append(oid)
+            if is_sel:
+                selected.append(oid)
+            row += 1
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["stacked_multi"],
+        )
+
+
+def _tab_side_by_side(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(SIDE_ROWS):
+        for label_col, opt_col in ((1, 3), (8, 10)):
+            lid = s.put(row, label_col, s.words.label(), "label")
+            texts = s.words.options(2)
+            sel = s.words.rng.randint(0, 1)
+            opts = [(texts[0], sel == 0), (texts[1], sel == 1)]
+            option_ids, selected = _put_options(s, row, opt_col, opts)
+            s.field(
+                kind="single",
+                label_cells=[lid],
+                option_cells=option_ids,
+                selected_option_cells=selected,
+                tags=["side_by_side"],
+            )
+        row += 1
+    # One row where two fields share a single competing marker: the marker at
+    # column 6 is a right candidate of the left field's option and a left
+    # candidate of the right field, so the outcome is ambiguous BY DESIGN and
+    # selected_ok is not penalised for these two fields.
+    left_label = s.put(row, 1, s.words.label(), "label")
+    left_marker = s.put(row, 3, MARKER, "marker")
+    left_option = s.put(row, 4, s.words.options(1)[0], "option")
+    s.put(row, 6, MARKER, "marker")
+    right_label = s.put(row, 8, s.words.label(), "label")
+    right_option = s.put(row, 10, s.words.options(1)[0], "option")
+    s.field(
+        kind="single",
+        label_cells=[left_label],
+        option_cells=[left_option],
+        selected_option_cells=[left_option],
+        tags=["side_by_side"],
+        expected_ambiguous=True,
+    )
+    s.field(
+        kind="single",
+        label_cells=[right_label],
+        option_cells=[right_option],
+        tags=["side_by_side"],
+        expected_ambiguous=True,
+    )
+    del left_marker  # marker cell is accounted for by Sheet.put; name only for clarity
+    s.dispose(row + 1, 1, s.words.note(), "note")
+    s.dispose(row + 2, 1, s.words.skip(), "skip")
+
+
+def _tab_label_two_rows(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(LTR_N):
+        l1 = s.put(row, 1, s.words.label(), "label")
+        l2 = s.put(row + 1, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 3, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[l1, l2],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["label_two_rows"],
+        )
+        row += 2
+    s.dispose(row, 1, s.words.note(), "note")
+    row += 1
+    s.dispose(row, 1, s.words.skip(), "skip")
+
+
+def _tab_label_two_cells(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(LTC_N):
+        first = s.words.label()
+        second = s.words.label()
+        l1 = s.put(row, 1, first, "label")
+        l2 = s.put(row, 2, second, "label")
+        text = s.words.text_value()
+        ans = s.put(row, 4, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[l1, l2],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["label_two_cells"],
+        )
+        row += 1
+
+
+def _tab_text_and_typed(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(TEXT_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 3, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[lid],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["text_field"],
+        )
+        row += 1
+    for _ in range(TYPED_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        ans = s.put(row, 3, s.words.typed_value(), "answer")
+        s.field(kind="bool", label_cells=[lid], answer_cells=[ans], tags=["typed_value"])
+        row += 1
+    s.dispose(row, 1, s.words.note(), "note")
+
+
+def _tab_no_glyph(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(NO_GLYPH_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        texts = s.words.options(3)
+        sel = s.words.rng.randint(0, 2)
+        option_ids: list[str] = []
+        col = 3
+        styled: str | None = None
+        for i, text in enumerate(texts):
+            if i == sel:
+                oid = s.put(row, col, text, "option", bold=True, fill=True)
+                styled = oid
+            else:
+                oid = s.put(row, col, text, "option")
+            option_ids.append(oid)
+            col += 1
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=[styled] if styled else [],
+            tags=["no_glyph_answer"],
+        )
+        row += 1
+    s.dispose(row, 1, s.words.note(), "note")
+    row += 1
+    s.dispose(row, 1, s.words.skip(), "skip")
+
+
+def _tab_grid(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(GRID_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        row += 1
+        texts = s.words.options(GRID_ROWS * GRID_COLS)
+        option_ids: list[str] = []
+        for i in range(GRID_ROWS):
+            for j in range(GRID_COLS):
+                oid = s.put(row + i, 2 + j, texts[i * GRID_COLS + j], "option")
+                option_ids.append(oid)
+        selected = [oid for k, oid in enumerate(option_ids) if k % 7 == 0]
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["grid_50"],
+        )
+        row += GRID_ROWS
+
+
+def _tab_matrix_and_merged(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    header = s.put(row, 2, s.words.header(), "option")
+    row += 1
+    for _ in range(MATRIX_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        ans = s.put(row, 2, s.words.typed_value(), "answer")
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=[header],
+            answer_cells=[ans],
+            tags=["matrix"],
+        )
+        row += 1
+    for _ in range(MERGED_N):
+        s.ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=2)
+        lid = s.put(row, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 4, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[lid],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["merged_tall"],
+        )
+        row += 2
+
+
+def _tab_gutter_and_non_answer(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(GUTTER_N):
+        lid = s.put(row, 2, s.words.label(), "label")
+        yn = s.words.yesno()
+        sel = s.words.rng.randint(0, 1)
+        opts = [(yn[0], sel == 0), (yn[1], sel == 1)]
+        option_ids, selected = _put_options(s, row, 4, opts)
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["gutter_column"],
+        )
+        row += 1
+    for _ in range(NON_ANSWER_N):
+        lid = s.put(row, 1, s.words.label(), "label")
+        opts = [(t, s.words.rng.random() < 0.5) for t in s.words.options(2)]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        ann = s.put(row, 12, s.words.annotation(), "annotation")
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            annotation_cells=[ann],
+            tags=["non_answer_column"],
+        )
+        row += 1
+    s.dispose(row, 1, s.words.skip(), "skip")
+
+
+DEV_TABS = (
+    ("Dev01", _tab_yes_no),
+    ("Dev02", _tab_dense),
+    ("Dev03", _tab_stacked),
+    ("Dev04", _tab_side_by_side),
+    ("Dev05", _tab_label_two_rows),
+    ("Dev06", _tab_label_two_cells),
+    ("Dev07", _tab_text_and_typed),
+    ("Dev08", _tab_no_glyph),
+    ("Dev09", _tab_grid),
+    ("Dev10", _tab_grid),
+    ("Dev11", _tab_matrix_and_merged),
+    ("Dev12", _tab_gutter_and_non_answer),
+)
+
+
+def _tab_hold_plain(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(6):
+        lid = s.put(row, 1, s.words.label(), "label")
+        yn = s.words.yesno()
+        sel = s.words.rng.randint(0, 1)
+        opts = [(yn[0], sel == 0), (yn[1], sel == 1)]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["yes_no_row"],
+        )
+        row += 1
+    for _ in range(6):
+        lid = s.put(row, 1, s.words.label(), "label")
+        opts = [(t, s.words.rng.random() < 0.4) for t in s.words.options(4)]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["dense_multi"],
+        )
+        row += 1
+
+
+def _tab_hold_stacked_side(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(6):
+        lid = s.put(row, 1, s.words.label(), "label")
+        row += 1
+        option_ids: list[str] = []
+        selected: list[str] = []
+        for text in s.words.options(3):
+            is_sel = s.words.rng.random() < 0.4
+            if is_sel:
+                s.put(row, 3, MARKER, "marker")
+            oid = s.put(row, 4, text, "option")
+            option_ids.append(oid)
+            if is_sel:
+                selected.append(oid)
+            row += 1
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["stacked_multi"],
+        )
+    for _ in range(3):
+        for label_col, opt_col in ((1, 3), (8, 10)):
+            lid = s.put(row, label_col, s.words.label(), "label")
+            texts = s.words.options(2)
+            sel = s.words.rng.randint(0, 1)
+            option_ids, selected = _put_options(
+                s, row, opt_col, [(texts[0], sel == 0), (texts[1], sel == 1)]
+            )
+            s.field(
+                kind="single",
+                label_cells=[lid],
+                option_cells=option_ids,
+                selected_option_cells=selected,
+                tags=["side_by_side"],
+            )
+        row += 1
+    left_label = s.put(row, 1, s.words.label(), "label")
+    left_option = s.put(row, 4, s.words.options(1)[0], "option")
+    s.put(row, 6, MARKER, "marker")
+    right_label = s.put(row, 8, s.words.label(), "label")
+    right_option = s.put(row, 10, s.words.options(1)[0], "option")
+    s.field(
+        kind="single",
+        label_cells=[left_label],
+        option_cells=[left_option],
+        selected_option_cells=[left_option],
+        tags=["side_by_side"],
+        expected_ambiguous=True,
+    )
+    s.field(
+        kind="single",
+        label_cells=[right_label],
+        option_cells=[right_option],
+        tags=["side_by_side"],
+        expected_ambiguous=True,
+    )
+
+
+def _tab_hold_labels_text(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(3):
+        l1 = s.put(row, 1, s.words.label(), "label")
+        l2 = s.put(row + 1, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 3, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[l1, l2],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["label_two_rows"],
+        )
+        row += 2
+    for _ in range(3):
+        l1 = s.put(row, 1, s.words.label(), "label")
+        l2 = s.put(row, 2, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 4, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[l1, l2],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["label_two_cells"],
+        )
+        row += 1
+    for _ in range(4):
+        lid = s.put(row, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 3, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[lid],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["text_field"],
+        )
+        row += 1
+    for _ in range(4):
+        lid = s.put(row, 1, s.words.label(), "label")
+        ans = s.put(row, 3, s.words.typed_value(), "answer")
+        s.field(kind="bool", label_cells=[lid], answer_cells=[ans], tags=["typed_value"])
+        row += 1
+
+
+def _tab_hold_no_glyph_non_answer(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(3):
+        lid = s.put(row, 1, s.words.label(), "label")
+        texts = s.words.options(3)
+        sel = s.words.rng.randint(0, 2)
+        option_ids: list[str] = []
+        styled = None
+        col = 3
+        for i, text in enumerate(texts):
+            if i == sel:
+                oid = s.put(row, col, text, "option", bold=True, fill=True)
+                styled = oid
+            else:
+                oid = s.put(row, col, text, "option")
+            option_ids.append(oid)
+            col += 1
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=[styled] if styled else [],
+            tags=["no_glyph_answer"],
+        )
+        row += 1
+    for _ in range(3):
+        lid = s.put(row, 1, s.words.label(), "label")
+        opts = [(t, s.words.rng.random() < 0.5) for t in s.words.options(2)]
+        option_ids, selected = _put_options(s, row, 3, opts)
+        ann = s.put(row, 12, s.words.annotation(), "annotation")
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            annotation_cells=[ann],
+            tags=["non_answer_column"],
+        )
+        row += 1
+
+
+def _tab_hold_grid_matrix(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(2):
+        lid = s.put(row, 1, s.words.label(), "label")
+        row += 1
+        texts = s.words.options(GRID_ROWS * GRID_COLS)
+        option_ids: list[str] = []
+        for i in range(GRID_ROWS):
+            for j in range(GRID_COLS):
+                oid = s.put(row + i, 2 + j, texts[i * GRID_COLS + j], "option")
+                option_ids.append(oid)
+        selected = [oid for k, oid in enumerate(option_ids) if k % 9 == 0]
+        s.field(
+            kind="multi",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["grid_50"],
+        )
+        row += GRID_ROWS
+    header = s.put(row, 2, s.words.header(), "option")
+    row += 1
+    for _ in range(3):
+        lid = s.put(row, 1, s.words.label(), "label")
+        ans = s.put(row, 2, s.words.typed_value(), "answer")
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=[header],
+            answer_cells=[ans],
+            tags=["matrix"],
+        )
+        row += 1
+
+
+def _tab_hold_merged_gutter(s: Sheet) -> None:
+    row = 1
+    s.dispose(row, 1, s.words.header(), "hdr")
+    row += 1
+    for _ in range(3):
+        s.ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=2)
+        lid = s.put(row, 1, s.words.label(), "label")
+        text = s.words.text_value()
+        ans = s.put(row, 4, text, "answer")
+        s.field(
+            kind="text",
+            label_cells=[lid],
+            answer_cells=[ans],
+            answer_text=text,
+            tags=["merged_tall"],
+        )
+        row += 2
+    for _ in range(3):
+        lid = s.put(row, 2, s.words.label(), "label")
+        yn = s.words.yesno()
+        sel = s.words.rng.randint(0, 1)
+        option_ids, selected = _put_options(
+            s, row, 4, [(yn[0], sel == 0), (yn[1], sel == 1)]
+        )
+        s.field(
+            kind="single",
+            label_cells=[lid],
+            option_cells=option_ids,
+            selected_option_cells=selected,
+            tags=["gutter_column"],
+        )
+        row += 1
+
+
+HELDOUT_TABS = (
+    ("Hold01", _tab_hold_plain),
+    ("Hold02", _tab_hold_stacked_side),
+    ("Hold03", _tab_hold_labels_text),
+    ("Hold04", _tab_hold_no_glyph_non_answer),
+    ("Hold05", _tab_hold_grid_matrix),
+    ("Hold06", _tab_hold_merged_gutter),
+)
+
+#: A different base for each tab so text does not repeat, still seed-driven.
+_SEED_STEP = 101
+
+
+def _sheet_rng(seed: int, index: int) -> random.Random:
+    return random.Random(seed + index * _SEED_STEP)
+
+
+def _write_workbook(wb, path: Path) -> bytes:
+    """Serialise `wb` deterministically to `path` and return the bytes."""
+    wb.properties.creator = "make_gold"
+    wb.properties.lastModifiedBy = "make_gold"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    src = zipfile.ZipFile(buf)
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info.filename)
+            if info.filename == "docProps/core.xml":
+                data = re.sub(
+                    rb"<dcterms:created[^>]*>[^<]*</dcterms:created>", _CREATED, data
+                )
+                data = re.sub(
+                    rb"<dcterms:modified[^>]*>[^<]*</dcterms:modified>", _MODIFIED, data
+                )
+            new_info = zipfile.ZipInfo(info.filename, date_time=_FIXED_TS)
+            new_info.compress_type = zipfile.ZIP_DEFLATED
+            new_info.external_attr = info.external_attr
+            dst.writestr(new_info, data)
+    payload = out.getvalue()
+    Path(path).write_bytes(payload)
+    return payload
+
+
+def build_set(set_name: str, seed: int, out_dir: Path):
+    """Write the .xlsx tabs, the gold JSON and the manifest for one set.
+
+    Returns ``(gold, manifest, sheets)`` where ``sheets`` is a list of
+    ``(tab_name, Sheet)`` for canned-dump generation.
+    """
+    tabs = DEV_TABS if set_name == "dev" else HELDOUT_TABS
+    pool = VOCAB[set_name]
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cells: list[dict] = []
+    fields: list[dict] = []
+    dispositions: list[dict] = []
+    sheets: list[tuple[str, Sheet]] = []
+    per_tab_sha: dict[str, str] = {}
+
+    for index, (tab_name, builder) in enumerate(tabs):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = tab_name
+        sheet = Sheet(ws, Words(pool, _sheet_rng(seed, index)))
+        builder(sheet)
+        payload = _write_workbook(wb, out_dir / f"{tab_name}.xlsx")
+        wb.close()
+        per_tab_sha[tab_name] = hashlib.sha256(payload).hexdigest()
+        cells.extend(sheet.cells)
+        fields.extend(sheet.fields)
+        dispositions.extend(sheet.dispositions)
+        sheets.append((tab_name, sheet))
+
+    gold = {
+        "gold_version": GOLD_VERSION,
+        "set": set_name,
+        "seed": seed,
+        "tabs": [name for name, _ in tabs],
+        "cells": cells,
+        "fields": fields,
+        "dispositions": dispositions,
+    }
+    tab_counts = {name: sum(1 for f in fields if f["tab"] == name) for name in gold["tabs"]}
+    tag_counts = {
+        tag: sum(1 for f in fields if tag in f["tags"]) for tag in FIELD_TAGS
+    }
+    disposition_counts = {
+        tag: sum(
+            1
+            for d in dispositions
+            if d["disposition"] == DISPOSITION_TAG_VALUE[tag]
+        )
+        for tag in DISPOSITION_TAGS
+    }
+    manifest = {
+        "gold_version": GOLD_VERSION,
+        "set": set_name,
+        "seed": seed,
+        "tabs": gold["tabs"],
+        "fields": len(fields),
+        "cells": len(cells),
+        "tag_counts": tag_counts,
+        "disposition_counts": disposition_counts,
+        "tab_counts": tab_counts,
+        "tab_sha256": per_tab_sha,
+    }
+    (out_dir / f"gold_{set_name}.json").write_text(
+        json.dumps(gold, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    (out_dir / f"gold_manifest_{set_name}.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    return gold, manifest, sheets
+
+
+# --------------------------------------------------------------------------
+# Canned record dumps: a perfect one plus one per mutation.
+# --------------------------------------------------------------------------
+
+def _gold_field_to_predicted(field: dict, cells_by_id: dict) -> dict:
+    kind = field["kind"]
+    label_text = " ".join(cells_by_id[c]["text"] for c in field["label_cells"])
+    options = [
+        {
+            "text": cells_by_id[c]["text"],
+            "selected": (
+                c in field["selected_option_cells"] if kind in ("single", "multi", "bool") else None
+            ),
+        }
+        for c in field["option_cells"]
+    ]
+    answers = [field["answer_text"]] if kind == "text" and field["answer_text"] else []
+    annotations = [cells_by_id[c]["text"] for c in field["annotation_cells"]]
+    source = (
+        list(field["label_cells"])
+        + list(field["option_cells"])
+        + list(field["answer_cells"])
+        + list(field["annotation_cells"])
+    )
+    return {
+        "label_text": label_text,
+        "control_type": _KIND_TO_CONTROL[kind],
+        "options": options,
+        "answers": answers,
+        "annotations": annotations,
+        "source_elements": source,
+        "tab": field["tab"],
+        "unresolved_source_refs": [],
+    }
+
+
+def perfect_record(gold: dict) -> dict:
+    cells_by_id = {c["id"]: c for c in gold["cells"]}
+    return {
+        "fields": [_gold_field_to_predicted(f, cells_by_id) for f in gold["fields"]],
+    }
+
+
+def _first_tab_with(gold: dict, predicate) -> str:
+    for f in gold["fields"]:
+        if predicate(f):
+            return f["tab"]
+    raise ValueError("no matching gold field")
+
+
+def mutations(gold: dict) -> dict[str, dict]:
+    """Return ``{mutation_name: record_dump}`` derived from the perfect dump."""
+    cells_by_id = {c["id"]: c for c in gold["cells"]}
+    perfect = perfect_record(gold)
+
+    def clone() -> dict:
+        return json.loads(json.dumps(perfect))
+
+    out: dict[str, dict] = {}
+
+    # drop one field
+    rec = clone()
+    rec["fields"].pop()
+    out["drop_field"] = rec
+
+    # merge two gold fields (from one tab) into a single predicted field.
+    tab = gold["fields"][0]["tab"]
+    pair = [f for f in gold["fields"] if f["tab"] == tab][:2]
+    rec = clone()
+    ids = [i for f in pair for i in f["label_cells"] + f["option_cells"]]
+    originals = [
+        i
+        for i, p in enumerate(rec["fields"])
+        if p["tab"] == tab and set(p["source_elements"]) & set(ids)
+    ]
+    for i in sorted(originals, reverse=True):
+        rec["fields"].pop(i)
+    rec["fields"].append(
+        {
+            "label_text": " ".join(cells_by_id[i]["text"] for i in pair[0]["label_cells"]),
+            "control_type": _KIND_TO_CONTROL[pair[0]["kind"]],
+            "options": [],
+            "answers": [],
+            "annotations": [],
+            "source_elements": ids,
+            "tab": tab,
+            "unresolved_source_refs": [],
+        }
+    )
+    out["merge_two"] = rec
+
+    # split one predicted field into two strict subsets.
+    target = next(
+        f for f in perfect["fields"] if len(f["options"]) >= 2
+    )
+    rec = clone()
+    idx = rec["fields"].index(target)
+    label_ids = [i for i in target["source_elements"] if cells_by_id[i]["role"] == "label"]
+    option_ids = [i for i in target["source_elements"] if cells_by_id[i]["role"] == "option"]
+    half = len(option_ids) // 2
+    part_a = list(label_ids) + option_ids[:half]
+    part_b = list(label_ids) + option_ids[half:]
+    rec["fields"].pop(idx)
+    for part in (part_a, part_b):
+        rec["fields"].append(
+            {
+                "label_text": target["label_text"],
+                "control_type": target["control_type"],
+                "options": [],
+                "answers": [],
+                "annotations": [],
+                "source_elements": part,
+                "tab": target["tab"],
+                "unresolved_source_refs": [],
+            }
+        )
+    out["split_one"] = rec
+
+    # wrong kind on one field (ids kept)
+    rec = clone()
+    victim = rec["fields"][0]
+    victim["control_type"] = "bool" if victim["control_type"] != "bool" else "text"
+    out["wrong_kind"] = rec
+
+    # stray hallucinated id added to one field (identity unchanged)
+    rec = clone()
+    rec["fields"][0]["source_elements"] = list(rec["fields"][0]["source_elements"]) + [
+        f"{rec['fields'][0]['tab']}!999:999"
+    ]
+    out["stray_id"] = rec
+
+    # an unresolved ref added to one field
+    rec = clone()
+    rec["fields"][0]["unresolved_source_refs"] = [
+        f"{rec['fields'][0]['tab']}!888:888"
+    ]
+    out["unresolved_ref"] = rec
+
+    # wrong label text on a matched field
+    rec = clone()
+    rec["fields"][0]["label_text"] = rec["fields"][0]["label_text"] + " epsilon"
+    out["wrong_label"] = rec
+
+    # wrong selected option on a field that has options
+    rec = clone()
+    victim = next(f for f in rec["fields"] if f["options"])
+    flags = [o["selected"] for o in victim["options"]]
+    victim["options"][0]["selected"] = not flags[0]
+    if len(victim["options"]) > 1:
+        victim["options"][1]["selected"] = not flags[1]
+    out["wrong_selected"] = rec
+
+    # wrong typed answer on a text field
+    rec = clone()
+    victim = next(f for f in rec["fields"] if f["control_type"] == "text")
+    victim["answers"] = [victim["answers"][0] + " zeta" if victim["answers"] else "zeta"]
+    out["wrong_answer"] = rec
+
+    # one whole tab's fields missing
+    tab = gold["tabs"][0]
+    rec = clone()
+    rec["fields"] = [f for f in rec["fields"] if f["tab"] != tab]
+    out["missing_tab"] = rec
+
+    # empty fields list
+    out["empty_fields"] = {"fields": []}
+
+    # duplicate one predicted field
+    rec = clone()
+    rec["fields"].append(json.loads(json.dumps(rec["fields"][0])))
+    out["duplicate_field"] = rec
+
+    return out
+
+
+def write_canned(gold: dict, canned_dir: Path) -> None:
+    canned_dir.mkdir(parents=True, exist_ok=True)
+    set_name = gold["set"]
+    perfect = perfect_record(gold)
+    (canned_dir / f"perfect_{set_name}.json").write_text(
+        json.dumps(perfect, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    for name, rec in mutations(gold).items():
+        (canned_dir / f"{name}_{set_name}.json").write_text(
+            json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--set", choices=sorted(VOCAB), default="dev")
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--canned", type=Path, default=None)
+    args = parser.parse_args(argv)
+
+    seed = args.seed if args.seed is not None else DEFAULT_SEEDS[args.set]
+    gold, manifest, _ = build_set(args.set, seed, args.out)
+    if args.canned is not None:
+        write_canned(gold, args.canned)
+    print(
+        f"{args.set}: {len(manifest['tabs'])} tabs, "
+        f"{manifest['fields']} fields, {manifest['cells']} cells, seed {seed}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

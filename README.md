@@ -336,6 +336,41 @@ seconds as `floor_seconds` (the per-call floor `F`), then one real tab measures
 the generation rate on top of it — start with thinking off
 (`--param thinkingBudget=0` on Gemini, or a non-reasoning model).
 
+#### Measuring grouping quality (the gold set)
+
+A faster output contract can quietly regroup fields while the latency numbers
+look good, so grouping quality is measured separately against a synthetic gold
+set whose correct fields are known by construction.
+
+```console
+python tools/make_gold.py --set dev --seed 20260101 --out gold --canned gold/canned
+python tools/score_gold.py --gold gold/gold_dev.json --record record.json
+```
+
+`tools/make_gold.py` (openpyxl only, never imports the package) writes one
+`.xlsx` per tab plus a gold JSON keyed by the xlsx element ids the ingest emits
+(`Sheet!row:col`), so the ground truth is independent of bands, regions and any
+model. The dev set is 12 tabs (~125 fields) covering a closed vocabulary of
+structure tags; `--set heldout` builds a second set with a different seed and a
+different vocabulary, which is never used for tuning. Regeneration is
+deterministic: the same `--seed` and `--set` produce byte-identical files.
+
+`tools/score_gold.py` (stdlib only) compares a record JSON dump — a full
+`InstanceRecord` dump from `to_json`, or a bare `{"fields": [...]}` — against a
+gold file and prints integers and percentages: strict field precision and recall
+(no half credit), `merge_count` / `split_count` / `missed` / `spurious`,
+`stray_ref_count` / `unresolved_ref_count`, and on matched pairs `label_ok`,
+`options_ok`, `selected_ok`, `answer_ok`, plus `addressed` (a **perception**
+coverage: the share of gold label/option cells any predicted field cites). Every
+number is also reported per structure tag (`small_n` marks a tag with fewer than
+five gold instances). The output contains only integers, percentages and tag
+names — never a label, a cell text or a tab name — so the same scorer can be run
+on your own workbook's gold: it prints numbers only.
+
+```console
+python tools/score_gold.py --gold gold/gold_dev.json --record record.json --json
+```
+
 ### 3. Test against the synthetic fixture directly
 
 ```python

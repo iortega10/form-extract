@@ -57,6 +57,20 @@ single schema version bump per output-changing release.
   cost/latency levers (thinking off, a fast non-reasoning model, an explicit
   `max_tokens`, `chunk_workers`, `reuse_layout_bindings`) with a cost note per
   row, plus a per-provider-family `params` table.
+- **Synthetic gold set and exact scorer (`tools/make_gold.py`,
+  `tools/score_gold.py`).** A grouping-quality measure that is independent of the
+  contract and of any model. `make_gold.py` (openpyxl only, never imports the
+  package) writes deterministic `.xlsx` tabs whose correct fields are known by
+  construction, plus a gold JSON and manifest keyed by the xlsx element ids the
+  ingest emits (`Sheet!row:col`); the dev set is 12 tabs (~125 fields) covering
+  a closed structure-tag vocabulary (each field tag ≥ 6 instances) and the
+  held-out set is a different seed and vocabulary. `score_gold.py` (stdlib only)
+  compares a record JSON dump against gold and prints strict field
+  precision/recall (no half credit), `merge_count`/`split_count`/`missed`/
+  `spurious`, `stray_ref_count`/`unresolved_ref_count`, the matched-pair
+  `label_ok`/`options_ok`/`selected_ok`/`answer_ok`, and `addressed`
+  (perception), overall and per tag — integers, percentages and tag names only,
+  never a label, cell text or tab name, so it is safe on private gold.
 
 ### Changed
 
