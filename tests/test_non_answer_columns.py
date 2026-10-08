@@ -7,7 +7,7 @@ import pytest
 
 from formextract.ingest import ingest
 from formextract.layout import analyze
-from formextract.model import ElementRef
+from formextract.model import ControlType, ElementRef
 from formextract.pipeline import (
     Pipeline,
     PipelineConfig,
@@ -105,10 +105,18 @@ def test_x_in_non_answer_column_ignored(tmp_path):
 
     assert len(record.fields) == 1
     resolved = record.fields[0]
-    assert resolved.value_normalized is None
+    # 0.6.0-K1: one option, no answer, no other field on its row -> the kind
+    # rule re-derives the lone `single_select` as `text` and the cited option
+    # cell becomes the answer. The kind changes by design (A4).
+    assert resolved.control_type is ControlType.TEXT
+    assert resolved.value_raw == "Option A"
+    assert resolved.value_normalized == "Option A"
+    assert resolved.answers == ["Option A"]
+    assert resolved.options == []
     assert resolved.provenance.review_flag is False
+    assert resolved.provenance.stated_control_type == "single_select"
+    assert resolved.provenance.kind_rule == "one_option_single"
     assert resolved.ambiguity is None
-    assert [o.selected for o in resolved.options] == [None]
     assert "X" in resolved.annotations
     assert "[annotation]" in client.prompts[0]
 
@@ -135,7 +143,13 @@ def test_non_answer_text_is_annotation_not_value(tmp_path):
     record = pipeline.run(path)
 
     resolved = record.fields[0]
-    assert resolved.value_normalized is None
+    # 0.6.0-K1: same shape as the previous case - the lone option cell (not the
+    # non-answer annotation) becomes the text answer. A4.
+    assert resolved.control_type is ControlType.TEXT
+    assert resolved.value_raw == "Option A"
+    assert resolved.value_normalized == "Option A"
+    assert resolved.answers == ["Option A"]
+    assert resolved.options == []
     assert "reference only" in " ".join(a.lower() for a in resolved.annotations)
 
 

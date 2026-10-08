@@ -152,6 +152,7 @@ class GoldLines:
         contract: str = "lines",
         conventions: bool = True,
         reuse: bool = False,
+        kind_rule: bool = True,
     ) -> list[dict]:
         """Run every tab through the real ``Pipeline``; return the fields.
 
@@ -165,6 +166,7 @@ class GoldLines:
                 list(self.gold.get("checkbox_conventions") or []) if conventions else []
             ),
             reuse_layout_bindings=reuse,
+            kind_rule=kind_rule,
         )
         client = LinesClient(texts_by_tab)
         store = Store(Path(store_dir))

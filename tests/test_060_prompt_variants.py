@@ -42,7 +42,7 @@ import make_gold  # noqa: E402
 from formextract.ingest import ingest  # noqa: E402
 from formextract.layout import analyze  # noqa: E402
 from formextract.lines import parse_lines  # noqa: E402
-from formextract.model import InstanceStatus, to_json  # noqa: E402
+from formextract.model import InstanceStatus, PIPELINE_VERSION, to_json  # noqa: E402
 from formextract.pipeline import (  # noqa: E402
     PROMPT_VARIANTS,
     Pipeline,
@@ -91,9 +91,15 @@ MAX_PROMPT_CHAR_RATIO = 1.60
 
 #: Two canned runs on the tiny workbook below, one record dump each, sha256 of
 #: the canonical dump (``_canonical_record_sha``): the json contract and the
-#: lines contract at ``base``. Both are HEAD's bytes.
-JSON_RECORD_SHA256 = "e33bafd6bc3a4b1fe0f8a791dfe62bc0e1f13a6cd0a77317e1695e97a194b1a8"
-LINES_RECORD_SHA256 = "06710633ecc5cb4b43620b900d80737bc59bcdf4ce41ded5807740a217f6d99c"
+#: lines contract at ``base``. Both carry ``pipeline_version="5"`` (0.6.0-K1).
+JSON_RECORD_SHA256 = "082c6144f3dc83c0899987ee2b955559d0b02a7da1fbe47c634e2977f19dede2"
+LINES_RECORD_SHA256 = "5429b585de1815bbbca8dee2a316839742eafec1a271574a37644c8db51d342e"
+
+#: The pre-K1 (0.6.0-L1b) values of the two hashes above, when the dump's
+#: ``pipeline_version`` is substituted back to ``"4"``. Kept as named historical
+#: pins: the K1 build's proof that only the version moved (A3).
+JSON_RECORD_SHA256_PRE_K1 = "e33bafd6bc3a4b1fe0f8a791dfe62bc0e1f13a6cd0a77317e1695e97a194b1a8"
+LINES_RECORD_SHA256_PRE_K1 = "06710633ecc5cb4b43620b900d80737bc59bcdf4ce41ded5807740a217f6d99c"
 
 #: ``compute_cache_key`` for the fixture params, with and without
 #: ``output_contract="lines"``, both at the default prompt variant. HEAD's values.
@@ -559,6 +565,45 @@ def test_the_json_contract_and_the_lines_base_path_are_byte_identical_to_head(tm
     assert hashes["json-fix1"] == JSON_RECORD_SHA256
 
 
+def test_the_kind_rule_off_dump_matches_head_except_the_version(tmp_path):
+    """A3: with ``kind_rule=False`` the dump equals HEAD's but for the version.
+
+    The rule-off record carries ``pipeline_version="5"``; substituting it back to
+    ``"4"`` (HEAD's constant) must reproduce the pre-K1 pins, so the only byte
+    the K1 build moved on an unaffected record is that one field.
+    """
+    path = _tiny_workbook(tmp_path / "tiny.xlsx")
+    runs = {
+        "json": (JSON_RESPONSE, "json", JSON_RECORD_SHA256_PRE_K1),
+        "lines": (LINES_RESPONSE, "lines", LINES_RECORD_SHA256_PRE_K1),
+    }
+    for name, (text, contract, old) in runs.items():
+        config = PipelineConfig(
+            model="canned", output_contract=contract, kind_rule=False
+        )
+        record = Pipeline(Store(tmp_path / f"off-{name}"), _Client(text), config).run(
+            path
+        )
+        assert record.pipeline_version == PIPELINE_VERSION == "5"
+        record.pipeline_version = "4"
+        assert _canonical_record_sha(record) == old, name
+
+
+def test_an_unaffected_record_is_byte_identical_rule_on_or_off(tmp_path):
+    """A record the rule cannot touch is the same dump with the knob either way."""
+    path = _tiny_workbook(tmp_path / "tiny.xlsx")
+    hashes = {}
+    for flag in (False, True):
+        config = PipelineConfig(
+            model="canned", output_contract="json", kind_rule=flag
+        )
+        record = Pipeline(
+            Store(tmp_path / f"knob-{flag}"), _Client(JSON_RESPONSE), config
+        ).run(path)
+        hashes[flag] = _canonical_record_sha(record)
+    assert hashes[False] == hashes[True] == JSON_RECORD_SHA256
+
+
 # --------------------------------------------------------------------------
 # The style cue (L1b): the ``fix2_style`` variant and its projection option.
 # --------------------------------------------------------------------------
@@ -792,7 +837,9 @@ def test_the_prompt_version_is_not_bumped_by_a_variant():
     from formextract.schema import SCHEMA_VERSION
 
     assert PROMPT_VERSION == "4"
-    assert PIPELINE_VERSION == "4"
+    # 0.6.0-K1 bumps PIPELINE_VERSION to "5" (the kind rule changes a default
+    # run's fields); the prompt itself is unchanged, so PROMPT_VERSION stays.
+    assert PIPELINE_VERSION == "5"
     assert SCHEMA_VERSION == "2"
     # the substance: the default variant's prompt, and therefore the default
     # instance key, is HEAD's byte for byte

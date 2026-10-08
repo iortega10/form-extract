@@ -274,14 +274,20 @@ LINE_MUTATION_DELTAS = {
     },
     "cut_before_end": {
         # One field per tab is cut: the tail after the last newline is a field
-        # line, so the section-3.5 rule drops it.
-        "predicted_fields": -16, "matched": -16, "matched_ignoring_kind": -16,
-        "missed": 16,
-        "label_ok": -16, "label_total": -16, "options_ok": -16, "options_total": -16,
-        "selected_ok": -8, "selected_total": -12,
-        "selected_ok_under_convention": -7, "selected_ambiguous_expected": -1,
+        # line, so the section-3.5 rule drops it. On Dev04 the cut line is the
+        # right half of the ``expected_ambiguous`` side-by-side pair, so the left
+        # half is left alone on a row that still holds its classified marker;
+        # 0.6.0-K1's marker clause (``kind_rule`` on by default) then re-derives
+        # that lone one-option ``single`` as ``bool`` - one kind confusion and one
+        # lost selection beyond the drop. With ``kind_rule=False`` this is the
+        # pre-K1 delta (-8 / -12, no confusion).
+        "predicted_fields": -16, "matched": -17, "matched_ignoring_kind": -16,
+        "kind_confusions": 1, "missed": 17, "spurious": 1,
+        "label_ok": -17, "label_total": -17, "options_ok": -17, "options_total": -17,
+        "selected_ok": -9, "selected_total": -13,
+        "selected_ok_under_convention": -7, "selected_ambiguous_expected": -2,
         "answer_ok": -4, "answer_total": -4, "addressed_num": -140,
-        "precision_num": -16, "precision_den": -16, "recall_num": -16,
+        "precision_num": -17, "precision_den": -16, "recall_num": -17,
     },
 }
 
@@ -299,6 +305,49 @@ def test_line_mutations_move_exactly_the_expected_counters(dev_scored, tmp_path_
             if isinstance(baseline.get(key), int) and overall.get(key) != baseline[key]
         }
         assert delta == expected, (name, delta)
+
+
+def test_the_extra_cut_before_end_delta_is_the_kind_rule(dev_scored, tmp_path_factory):
+    """The cut delta grew by exactly K1's marker clause, proven by the switch.
+
+    With ``kind_rule=False`` the cut mutation moves only the pre-K1 counters, and
+    the perfect run is byte-for-byte unaffected. The rule adds the kind confusion
+    and the lost selection on the surviving half of the cut side-by-side pair, so
+    ``LINE_MUTATION_DELTAS["cut_before_end"]`` is the pre-K1 numbers plus that.
+    """
+    dev, res = dev_scored
+    baseline_on = res["overall"]
+    pre_k1 = {
+        "predicted_fields": -16, "matched": -16, "matched_ignoring_kind": -16,
+        "missed": 16,
+        "label_ok": -16, "label_total": -16, "options_ok": -16, "options_total": -16,
+        "selected_ok": -8, "selected_total": -12,
+        "selected_ok_under_convention": -7, "selected_ambiguous_expected": -1,
+        "answer_ok": -4, "answer_total": -4, "addressed_num": -140,
+        "precision_num": -16, "precision_den": -16, "recall_num": -16,
+    }
+
+    def overall(fields):
+        return gold_lines.score(dev.gold, fields)["overall"]
+
+    def delta(after, before):
+        return {
+            key: after[key] - before[key]
+            for key in score_gold.COUNTER_KEYS
+            if isinstance(before.get(key), int) and after.get(key) != before[key]
+        }
+
+    perfect_off = dev.run(
+        dev.perfect(), tmp_path_factory.mktemp("cut-perfect-off"), kind_rule=False
+    )
+    baseline_off = overall(perfect_off)
+    # the rule touches no perfect-run field, so the baseline is unmoved
+    assert baseline_off == baseline_on
+
+    mutated_off = dev.run(
+        dev.mutation("cut_before_end"), tmp_path_factory.mktemp("cut-off"), kind_rule=False
+    )
+    assert delta(overall(mutated_off), baseline_off) == pre_k1
 
 
 # --------------------------------------------------------------------------

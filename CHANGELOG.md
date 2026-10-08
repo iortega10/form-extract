@@ -302,6 +302,28 @@ single schema version bump per output-changing release.
   (the committed `OLD_TAB_SHA256` table is untouched), v3 keeps v2's per-tag field
   counts, and the four `V3_TAB_SHA256` rows whose tabs hold typed-value rows
   (Dev07, Dev14, Hold03, Hold07) are refreshed.
+- **One-option `single` kind rule (0.6.0-K1, `formextract/resolve.py`).** A draft
+  the model states as `single_select` with exactly one option, no answer
+  evidence (no answers, no `A=` ref, no selected option) and no other draft on
+  its tab sharing a lattice row is a typed value cited as an option, not a
+  single choice: the resolver re-derives it as `text` with the cited option cell
+  as the answer, or as `bool` when a row of its source elements holds a marker
+  the layout classified (`layout.marker_classes`; the bool path then selects the
+  mark). Both contracts go through one shared `apply_kind_rule`, called once
+  from `author_drafts`; `PipelineConfig.kind_rule` (default **on**) turns it off,
+  and the cache key carries a token only when it is `False`. `Provenance` gains
+  `stated_control_type` and `kind_rule` (`one_option_single`), written only when
+  the rule fires: `_encode`/`to_json` now omit a dataclass field whose
+  `field(metadata={"omit_if_default": True})` and whose value is still its
+  default, so no existing record byte moves and `SCHEMA_VERSION` stays `"2"`
+  (the coverage-block precedent holds only with this emit-on-set serialiser).
+  `PIPELINE_VERSION` moves `"4"` -> `"5"` (the instance key must invalidate) and
+  `KIND_RULE_VERSION = "1"` is added; the call cache keys on prompt text, which
+  does not change. `tools/replay_kind_rule.py` replays a `--record-out` dump off
+  and on against a gold dir, reading the lattice from the gold `.xlsx`. **Known
+  limit (do not fix):** an unchecked lone box spelled with the unicode glyphs
+  `□`/`☐` is a classified marker, so the marker clause makes it `bool`; a literal
+  ASCII `[ ]` is not in `_MARKS` and is re-derived as `text`.
 
 ### Known issues
 

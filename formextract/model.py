@@ -21,7 +21,17 @@ from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 # moves once. The default json prompt and projection stay byte-identical to
 # 0.5.0 and the call cache keys on the prompt text, so cached 0.5.x calls are
 # still served even though the instance key misses.
-PIPELINE_VERSION = "4"
+# 0.6.0-K1 moves this to "5": the resolver re-derives a one-option
+# `single_select` as `text`/`bool` by default (PipelineConfig.kind_rule), so a
+# default-config run's fields change and cached 0.6.0-L1b instances must not be
+# served. The call cache keys on prompt text, which does not change, so cached
+# calls are still served.
+PIPELINE_VERSION = "5"
+
+#: 0.6.0-K1: the id of the `one_option_single` kind rule, recorded on a
+#: `Provenance` the rule re-derived and used as the cache-key token when the
+#: knob is off.
+KIND_RULE_VERSION = "1"
 
 
 class RegionType(str, Enum):
@@ -251,6 +261,15 @@ class Provenance:
     review_flag: bool = False
     review_reason: ReviewReason | None = None
     derived_confidence: float | None = None
+    #: 0.6.0-K1: the model's stated control type, kept only when the resolver's
+    #: ``one_option_single`` kind rule re-derived the field. Emitted only while
+    #: set (``omit_if_default``), so an unaffected record's bytes are unchanged.
+    stated_control_type: str | None = field(
+        default=None, metadata={"omit_if_default": True}
+    )
+    #: 0.6.0-K1: the id of the rule that re-derived the field
+    #: (``one_option_single``); emitted only while set.
+    kind_rule: str | None = field(default=None, metadata={"omit_if_default": True})
 
 
 @dataclass
@@ -359,6 +378,15 @@ class BindingDraft:
     #: The resolver honours it after its own unresolved-ref and ambiguity flags.
     #: ``None`` on the JSON path.
     review_reason: ReviewReason | None = None
+    #: 0.6.0-K1: the ``A=`` cell refs of a one-option ``single_select`` the
+    #: resolver's kind rule may re-derive as ``text``. Defaulted and not part of
+    #: a record (a draft is never serialised). Empty on the JSON path.
+    option_refs: tuple[ElementRef, ...] = ()
+    #: 0.6.0-K1: the rule id when the kind rule re-derived this draft, and the
+    #: model's stated control type it overrode. Defaulted; carried onto the
+    #: ``Field.provenance`` only when set.
+    kind_rule: str | None = None
+    stated_control_type: str | None = None
 
 
 @dataclass
@@ -565,7 +593,18 @@ def _encode(obj: Any) -> Any:
     if isinstance(obj, Enum):
         return obj.value
     if is_dataclass(obj) and not isinstance(obj, type):
-        return {f.name: _encode(getattr(obj, f.name)) for f in fields(obj)}
+        out: dict[str, Any] = {}
+        for f in fields(obj):
+            value = getattr(obj, f.name)
+            # Emit-on-set: a field marked ``omit_if_default`` is written only
+            # while it differs from its declared default, so a field added to an
+            # existing dataclass does not move an unaffected record's bytes. No
+            # field carried the flag before 0.6.0-K1, so every existing record
+            # serialises exactly as it did and SCHEMA_VERSION stays "2".
+            if f.metadata.get("omit_if_default") and value == f.default:
+                continue
+            out[f.name] = _encode(value)
+        return out
     if isinstance(obj, (list, tuple)):
         return [_encode(v) for v in obj]
     if isinstance(obj, dict):

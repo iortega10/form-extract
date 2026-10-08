@@ -238,7 +238,8 @@ def test_pdf_marker_behaviour_unchanged(spec_pdf):
 def test_pipeline_version_is_in_the_cache_key(tmp_path):
     assert SCHEMA_VERSION == "2"
     assert PROMPT_VERSION == "4"
-    assert PIPELINE_VERSION == "4"
+    # 0.6.0-K1: the one-option kind rule changes a default run's fields.
+    assert PIPELINE_VERSION == "5"
 
     base = dict(
         content_hash="abc123",

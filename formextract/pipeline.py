@@ -297,6 +297,7 @@ def compute_cache_key(
     min_coverage: float | None = None,
     output_contract: str = "json",
     prompt_variant: str = "base",
+    kind_rule: bool = True,
 ) -> str:
     params_hash = hashlib.sha256(
         canonical_json(params).encode("utf-8")
@@ -325,6 +326,11 @@ def compute_cache_key(
     # config (and carries coverage=[], the cost of not invalidating).
     if min_coverage is not None:
         parts.append(f"mincov={float(min_coverage)!r}")
+    # 0.6.0-K1: the resolver's one-option kind rule is on by default; a
+    # ``False`` token is appended only when the knob is off, so toggling it can
+    # never serve an instance authored by the other setting.
+    if not kind_rule:
+        parts.append("kind_rule=0")
     # One canonical token appended whenever the contract is not the json
     # default, so a toggled knob can never alias a stale json instance, and a
     # third contract can never alias "lines".
@@ -404,6 +410,11 @@ class PipelineConfig:
     experiments measured with ``live_probe.py --gold --prompt-variant``. The json
     contract ignores the field; it is appended to the cache key whenever it is
     not ``"base"`` (so the projection options it carries ride along with it).
+    ``kind_rule`` (default ``True``, 0.6.0-K1) lets the resolver re-derive a
+    lone one-option ``single_select`` (one option, no answer, no other field on
+    its lattice row) as ``text`` or ``bool``; the cache key carries a token only
+    when it is ``False``. ``False`` turns the pass off and leaves every field's
+    kind as the model stated it.
     """
 
     model: str = "gpt-4o-mini"
@@ -418,6 +429,7 @@ class PipelineConfig:
     min_coverage: float | None = None
     output_contract: str = "json"
     prompt_variant: str = "base"
+    kind_rule: bool = True
 
 
 class Pipeline:
@@ -490,6 +502,7 @@ class Pipeline:
                 layout=layout,
                 elements_by_id=elements_by_id,
                 non_answer_element_ids=non_answer_ids,
+                kind_rule=self.config.kind_rule,
             )
 
         def author_many(indices):
@@ -586,6 +599,7 @@ class Pipeline:
             min_coverage=self.config.min_coverage,
             output_contract=self.config.output_contract,
             prompt_variant=self.config.prompt_variant,
+            kind_rule=self.config.kind_rule,
         )
         if not force:
             existing = self.store.find_instance(idempotency_key)
@@ -713,6 +727,7 @@ class Pipeline:
                             layout=layout,
                             elements_by_id=elements_by_id,
                             non_answer_element_ids=non_answer_ids,
+                            kind_rule=self.config.kind_rule,
                         )
                         fields = drafts_to_fields(
                             drafts,

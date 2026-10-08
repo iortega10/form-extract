@@ -825,6 +825,9 @@ def _draft_from_record(
 
     options: list[Option] = []
     option_of_element: dict[str, Option] = {}
+    #: 0.6.0-K1: the ``O`` refs of the option cells, so the kind rule can turn a
+    #: one-option ``single_select``'s cited cell into the text answer's evidence.
+    option_refs: list[ElementRef] = []
     cited_ids: set[str] = set(l_ids)
 
     for item in record.options:
@@ -848,6 +851,9 @@ def _draft_from_record(
             if joined:
                 option = Option(text=joined)
                 options.append(option)
+                option_refs.extend(
+                    _ref_to_element_ref(lattice, ref) for ref in item_refs(item)
+                )
                 for element_id in element_ids:
                     option_of_element[element_id] = option
             continue
@@ -860,6 +866,9 @@ def _draft_from_record(
             option = Option(text=text)
             options.append(option)
             option_of_element[element_id] = option
+        option_refs.extend(
+            _ref_to_element_ref(lattice, ref) for ref in item_refs(item)
+        )
 
     annotations: list[str] = []
     for item in record.notes:
@@ -880,7 +889,9 @@ def _draft_from_record(
             answer_element_ids.append(element_id)
     cited_ids.update(answer_element_ids)
 
-    answer_refs: tuple[ElementRef, ...] = ()
+    answer_refs: tuple[ElementRef, ...] = tuple(
+        _ref_to_element_ref(lattice, ref) for ref in answer_items
+    )
     if record.kind is LineKind.TEXT:
         texts = [
             strip_marks(_element_text(elements_by_id, element_id))
@@ -888,7 +899,6 @@ def _draft_from_record(
         ]
         joined = " ".join(text for text in texts if text)
         answers = [joined] if joined else []
-        answer_refs = tuple(_ref_to_element_ref(lattice, ref) for ref in answer_items)
     else:
         answers = []
         for element_id in answer_element_ids:
@@ -936,6 +946,7 @@ def _draft_from_record(
         region_id=region_id,
         source_refs=source_refs,
         answer_refs=answer_refs,
+        option_refs=tuple(option_refs),
         confidence=None,
         review_reason=ReviewReason.AMBIGUOUS_ROLE if record.review else None,
         provenance=BindingProvenance(
@@ -980,6 +991,114 @@ def _injected_marker_refs(
         if ref is not None:
             injected.append(ref)
     return injected
+
+
+#: 0.6.0-K1: the rule id recorded on a `Provenance` the kind rule re-derived.
+KIND_RULE_ID = "one_option_single"
+
+
+def _draft_element_ids(
+    layout: LayoutResult, refs
+) -> list[tuple[int, str]]:
+    """``(page, element_id)`` for every ``ElementRef`` that resolves to a cell."""
+    region_by_id = {r.region_id: r for r in layout.regions}
+    out: list[tuple[int, str]] = []
+    for ref in refs:
+        region = region_by_id.get(ref.region_id)
+        if region is None:
+            continue
+        band = layout.bands.get(region.bbox.page * 1000 + region.column)
+        if band is None or ref.band_id < 0 or ref.band_id >= len(band):
+            continue
+        segment = band[ref.band_id]
+        if ref.segment_index < 0 or ref.segment_index >= len(segment):
+            continue
+        out.append((region.bbox.page, segment[ref.segment_index]))
+    return out
+
+
+def apply_kind_rule(
+    drafts: list[BindingDraft],
+    *,
+    layout: LayoutResult | None,
+    elements_by_id: dict[str, Element] | None,
+    non_answer_element_ids: set[str] | None,
+) -> None:
+    """Re-derive a lone one-option ``single_select`` as ``text`` or ``bool``.
+
+    0.6.0-K1 (rule id ``one_option_single``). A draft is re-derived when ALL of:
+    (1) it states ``single_select``; (2) it has exactly one option element AND
+    carries no answer evidence (no ``answers``, no ``A=`` refs, no selected
+    option) - a draft that already states an answer is not a typed value cited
+    as an option; and (3) no other draft on the same tab has a source element in
+    any lattice row its own source elements occupy (the shared-row exception: a
+    one-option control beside another control group is a side-by-side layout,
+    not a typed value). A row that holds a marker the layout classified makes it
+    ``bool`` (let the existing bool path select the mark); otherwise ``text``,
+    with the cited option cell becoming the answer evidence. Mutates ``drafts``
+    in place; the caller decides whether to run it (``PipelineConfig.kind_rule``).
+    """
+    if layout is None or not drafts:
+        return
+    elements_by_id = elements_by_id or {}
+    non_answer_ids = set(non_answer_element_ids or ())
+    lattices = build_all_rows(layout, elements_by_id)
+
+    marker_rows: set[tuple[int, int]] = set()
+    for mc in layout.marker_classes:
+        if mc.marker_element_id in non_answer_ids:
+            continue
+        element = elements_by_id.get(mc.marker_element_id)
+        if element is None:
+            continue
+        lattice = lattices.get(element.bbox.page)
+        row = lattice.row_of_element(mc.marker_element_id) if lattice else None
+        if row is not None:
+            marker_rows.add((element.bbox.page, row))
+
+    def rows_of(draft: BindingDraft) -> set[tuple[int, int]]:
+        rows: set[tuple[int, int]] = set()
+        for page, element_id in _draft_element_ids(layout, draft.source_refs):
+            if element_id in non_answer_ids:
+                continue
+            lattice = lattices.get(page)
+            row = lattice.row_of_element(element_id) if lattice else None
+            if row is not None:
+                rows.add((page, row))
+        return rows
+
+    by_tab: dict[str | None, list[tuple[int, set[tuple[int, int]]]]] = {}
+    rows_by_draft: list[set[tuple[int, int]]] = []
+    for i, draft in enumerate(drafts):
+        rows = rows_of(draft)
+        rows_by_draft.append(rows)
+        by_tab.setdefault(draft.tab, []).append((i, rows))
+
+    for i, draft in enumerate(drafts):
+        if draft.control_type is not ControlType.SINGLE_SELECT:
+            continue
+        if len(draft.options) != 1:
+            continue
+        if (
+            draft.answers
+            or draft.answer_refs
+            or any(option.selected for option in draft.options)
+        ):
+            continue
+        mine = rows_by_draft[i]
+        if any(
+            j != i and (other & mine) for j, other in by_tab.get(draft.tab, ())
+        ):
+            continue
+        draft.stated_control_type = draft.control_type.value
+        draft.kind_rule = KIND_RULE_ID
+        if mine & marker_rows:
+            draft.control_type = ControlType.BOOL
+        else:
+            draft.control_type = ControlType.TEXT
+            draft.answers = [draft.options[0].text]
+            draft.answer_refs = tuple(draft.option_refs)
+            draft.options = []
 
 
 def parse_lines_response(
@@ -1295,6 +1414,7 @@ def author_drafts(
     elements_by_id: dict[str, Element] | None = None,
     non_answer_element_ids: set[str] | None = None,
     dispositions_out: list[Disposition] | None = None,
+    kind_rule: bool = True,
 ) -> tuple[list[BindingDraft], list[LLMCall], list[ResolutionError]]:
     region_bbox = {r.region_id: r.bbox for r in (regions or [])}
     lines_mode = output_contract == "lines"
@@ -1550,6 +1670,15 @@ def author_drafts(
         errors.extend(chunk_errors)
         if dispositions_out is not None:
             dispositions_out.extend(chunk_dispositions)
+    if kind_rule:
+        # 0.6.0-K1: one shared pass over every draft, for both contracts, before
+        # resolution branches on ``draft.control_type``.
+        apply_kind_rule(
+            drafts,
+            layout=layout,
+            elements_by_id=elements_by_id,
+            non_answer_element_ids=non_answer_ids,
+        )
     return drafts, calls, errors
 
 
@@ -2217,6 +2346,11 @@ def drafts_to_fields(
                 binding_id=draft.draft_id,
                 llm_confidence=draft.confidence,
             )
+            if draft.kind_rule is not None:
+                # 0.6.0-K1: the rule re-derived this field; keep the model's
+                # stated kind beside the rule id. Written only when it fired.
+                provenance.stated_control_type = draft.stated_control_type
+                provenance.kind_rule = draft.kind_rule
             if unresolved:
                 provenance.review_flag = True
                 provenance.review_reason = ReviewReason.UNRESOLVED_REFERENCE

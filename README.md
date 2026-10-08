@@ -300,6 +300,19 @@ for block in record.coverage:
     print(block.tab, block.ratio, len(block.unbound))
 ```
 
+**One-option `single` kind rule.** `PipelineConfig.kind_rule` (default `True`)
+re-derives a draft the model states as `single_select` with exactly one option,
+no answer and no other field on its lattice row — a typed value cited as an
+option, not a single choice: the cited cell becomes the answer and the kind
+becomes `text`, or `bool` when the row holds a marker the layout classified. A
+field that already states an answer is left alone. Only a re-derived field's
+`provenance` gains `stated_control_type` (the model's kind) and `kind_rule`
+(`one_option_single`), so every other record serialises byte-identically;
+`SCHEMA_VERSION` stays `"2"`, `PIPELINE_VERSION` is `"5"`. Set `kind_rule=False`
+to leave the model's kind as stated (it still moves the instance cache key). One
+known limit: an unchecked lone box spelled `□`/`☐` is a classified marker, so it
+reads as `bool`; a literal ASCII `[ ]` is not a mark and reads as `text`.
+
 **Pitfalls.**
 
 - `force=True` re-sends every chunk: it skips both the instance cache and the
