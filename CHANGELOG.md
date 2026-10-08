@@ -318,12 +318,16 @@ single schema version bump per output-changing release.
   default, so no existing record byte moves and `SCHEMA_VERSION` stays `"2"`
   (the coverage-block precedent holds only with this emit-on-set serialiser).
   `PIPELINE_VERSION` moves `"4"` -> `"5"` (the instance key must invalidate) and
-  `KIND_RULE_VERSION = "1"` is added; the call cache keys on prompt text, which
+  `KIND_RULE_VERSION` (now `"2"`, see below) is added; the call cache keys on prompt text, which
   does not change. `tools/replay_kind_rule.py` replays a `--record-out` dump off
-  and on against a gold dir, reading the lattice from the gold `.xlsx`. **Known
-  limit (do not fix):** an unchecked lone box spelled with the unicode glyphs
-  `□`/`☐` is a classified marker, so the marker clause makes it `bool`; a literal
-  ASCII `[ ]` is not in `_MARKS` and is re-derived as `text`.
+  and on against a gold dir, reading the lattice from the gold `.xlsx`. A lone
+  checkbox is a `bool`: the unicode glyphs `□`/`☐` are classified markers, and
+  `KIND_RULE_VERSION` `"2"` also treats a literal ASCII box spelling at the start
+  of a cell in the draft's row (`[ ]`, `[]`, `[x]`, `[X]`, `( )`, `(x)`, alone or
+  followed by text such as `[ ] I consent`) as a marker. Before that guard a lone
+  `[ ]` was re-derived as `text` with the option label as its answer. The
+  recogniser reads a cell's text only to spot that glyph spelling, never its
+  wording; near misses (`(1) Alpha`, `[xy]`, `[ ]x`) are not boxes.
 
 ### Known issues
 

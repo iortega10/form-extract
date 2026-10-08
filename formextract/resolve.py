@@ -996,6 +996,13 @@ def _injected_marker_refs(
 #: 0.6.0-K1: the rule id recorded on a `Provenance` the kind rule re-derived.
 KIND_RULE_ID = "one_option_single"
 
+#: A literal ASCII checkbox spelling (``[ ]``, ``[]``, ``[x]``, ``( )``, ``(X)``) at the start of a
+#: cell, alone or followed by whitespace and text (``[ ] I consent``). ``layout._MARKS`` carries the
+#: unicode box glyphs but not these spellings, so without this a lone ASCII box beside one option
+#: would be re-derived as ``text`` with the option label as its "answer". The kind rule reads a cell's
+#: text only to recognise this glyph spelling, never its wording.
+_ASCII_BOX = re.compile(r"^[\[(]\s*[xX]?\s*[\])](?:\s|$)")
+
 
 def _draft_element_ids(
     layout: LayoutResult, refs
@@ -1033,7 +1040,8 @@ def apply_kind_rule(
     as an option; and (3) no other draft on the same tab has a source element in
     any lattice row its own source elements occupy (the shared-row exception: a
     one-option control beside another control group is a side-by-side layout,
-    not a typed value). A row that holds a marker the layout classified makes it
+    not a typed value). A row that holds a marker the layout classified, or a literal ASCII
+    checkbox spelling (``[ ]``, ``[x]``, ``( )``), makes it
     ``bool`` (let the existing bool path select the mark); otherwise ``text``,
     with the cited option cell becoming the answer evidence. Mutates ``drafts``
     in place; the caller decides whether to run it (``PipelineConfig.kind_rule``).
@@ -1053,6 +1061,14 @@ def apply_kind_rule(
             continue
         lattice = lattices.get(element.bbox.page)
         row = lattice.row_of_element(mc.marker_element_id) if lattice else None
+        if row is not None:
+            marker_rows.add((element.bbox.page, row))
+
+    for element_id, element in elements_by_id.items():
+        if element_id in non_answer_ids or not _ASCII_BOX.match(element.text.strip()):
+            continue
+        lattice = lattices.get(element.bbox.page)
+        row = lattice.row_of_element(element_id) if lattice else None
         if row is not None:
             marker_rows.add((element.bbox.page, row))
 

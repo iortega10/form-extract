@@ -253,22 +253,86 @@ def test_the_marker_clause_rederives_bool(tmp_path):
     assert [o.text for o in draft.options] == ["Only"]
 
 
-def test_an_ascii_bracket_box_is_not_a_marker(tmp_path):
-    """A5 limit: literal ``[ ]`` is not in the layout's mark vocabulary."""
-    path = _workbook(
-        tmp_path / "ascii.xlsx", [[(1, "Agree"), (3, "[ ] I consent")]]
-    )
-    _ing, layout, by_id, lattice = _fixture(path)
-    draft = BindingDraft(
+def _lone_draft(lattice, label_cell, option_cell, option_text):
+    return BindingDraft(
         draft_id="d1",
         label="Agree",
         control_type=ControlType.SINGLE_SELECT,
         bbox=BBox(),
-        options=[Option(text="[ ] I consent", selected=None)],
-        source_refs=[_ref(lattice, "S!1:1"), _ref(lattice, "S!1:3")],
-        option_refs=(_ref(lattice, "S!1:3"),),
+        options=[Option(text=option_text, selected=None)],
+        source_refs=[_ref(lattice, label_cell), _ref(lattice, option_cell)],
+        option_refs=(_ref(lattice, option_cell),),
         tab=SHEET,
     )
+
+
+def test_an_ascii_box_inside_the_option_text_rederives_bool(tmp_path):
+    """The A5 limit is closed: ``[ ] I consent`` is a lone checkbox, a ``bool``, not a typed value."""
+    path = _workbook(
+        tmp_path / "ascii_in.xlsx", [[(1, "Agree"), (3, "[ ] I consent")]]
+    )
+    _ing, layout, by_id, lattice = _fixture(path)
+    draft = _lone_draft(lattice, "S!1:1", "S!1:3", "[ ] I consent")
+    _apply([draft], layout, by_id)
+    assert draft.control_type is ControlType.BOOL
+    assert draft.kind_rule == KIND_RULE_ID
+    assert draft.answers == []
+
+
+def test_an_ascii_box_in_its_own_cell_rederives_bool(tmp_path):
+    """The reviewer's probe: ``[ ]`` in a neighbouring cell, the label in the option cell."""
+    path = _workbook(
+        tmp_path / "ascii_sep.xlsx", [[(1, "Agree"), (3, "[ ]"), (4, "I agree")]]
+    )
+    _ing, layout, by_id, lattice = _fixture(path)
+    draft = _lone_draft(lattice, "S!1:1", "S!1:4", "I agree")
+    _apply([draft], layout, by_id)
+    assert draft.control_type is ControlType.BOOL
+
+
+def test_checked_ascii_spellings_are_boxes_too(tmp_path):
+    for n, spelling in enumerate(("[x]", "[X]", "[]", "( )", "(x)", "(X) Yes", "[ ]")):
+        path = _workbook(
+            tmp_path / f"spell{n}.xlsx", [[(1, "Agree"), (3, spelling), (4, "Yes")]]
+        )
+        _ing, layout, by_id, lattice = _fixture(path)
+        draft = _lone_draft(lattice, "S!1:1", "S!1:4", "Yes")
+        _apply([draft], layout, by_id)
+        assert draft.control_type is ControlType.BOOL, spelling
+
+
+def test_near_miss_spellings_are_not_boxes(tmp_path):
+    """A numbered or lettered item, or an empty bracket pair with text glued on, is a typed value."""
+    for n, value in enumerate(("(1) Alpha", "[a] Beta", "[xy]", "[ ]x", "(12)")):
+        path = _workbook(
+            tmp_path / f"near{n}.xlsx", [[(1, "Enter the code"), (3, value)]]
+        )
+        _ing, layout, by_id, lattice = _fixture(path)
+        draft = _lone_draft(lattice, "S!1:1", "S!1:3", value)
+        _apply([draft], layout, by_id)
+        assert draft.control_type is ControlType.TEXT, value
+        assert draft.answers == [value], value
+
+
+def test_the_replay_tool_models_the_same_ascii_boxes_as_the_resolver():
+    """The replay tool never imports the resolver, so its copy of the pattern is pinned here."""
+    import formextract.resolve as resolve
+
+    assert replay_kind_rule.ASCII_BOX.pattern == resolve._ASCII_BOX.pattern
+
+
+def test_mutation_without_the_ascii_guard_the_box_reads_as_text(tmp_path, monkeypatch):
+    """Anti-vacuity: with the recogniser disabled the lone ``[ ]`` is a text field again."""
+    import re as _re
+
+    import formextract.resolve as resolve
+
+    monkeypatch.setattr(resolve, "_ASCII_BOX", _re.compile(r"(?!)"))
+    path = _workbook(
+        tmp_path / "ascii_mut.xlsx", [[(1, "Agree"), (3, "[ ] I consent")]]
+    )
+    _ing, layout, by_id, lattice = _fixture(path)
+    draft = _lone_draft(lattice, "S!1:1", "S!1:3", "[ ] I consent")
     _apply([draft], layout, by_id)
     assert draft.control_type is ControlType.TEXT
     assert draft.answers == ["[ ] I consent"]
@@ -385,7 +449,7 @@ def test_kind_rule_id_is_exported():
     from formextract.model import KIND_RULE_VERSION as MODEL_KIND_RULE_VERSION
 
     assert KIND_RULE_ID == "one_option_single"
-    assert KIND_RULE_VERSION == MODEL_KIND_RULE_VERSION == "1"
+    assert KIND_RULE_VERSION == MODEL_KIND_RULE_VERSION == "2"
 
 
 # --------------------------------------------------------------------------

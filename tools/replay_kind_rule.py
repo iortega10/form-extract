@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -32,6 +33,10 @@ import score_gold
 from formextract.ingest import ingest
 from formextract.layout import analyze
 from formextract.rows import build_all_rows
+
+#: The literal ASCII checkbox spellings the shipped rule treats as a marker. This is a copy, on
+#: purpose (the tool never imports the resolver); a test asserts it equals ``resolve._ASCII_BOX``.
+ASCII_BOX = re.compile(r"^[\[(]\s*[xX]?\s*[\])](?:\s|$)")
 
 #: Per-tag counters the reviewer's table reports; the rest are still summed into
 #: the overall line but not printed, to keep the two runs side by side.
@@ -77,6 +82,13 @@ class Replay:
                     continue
                 lattice = lattices.get(element.bbox.page)
                 row = lattice.row_of_element(mc.marker_element_id) if lattice else None
+                if row is not None:
+                    rows.add((element.bbox.page, row))
+            for element_id, element in by_id.items():
+                if element_id in self.non_answer_ids or not ASCII_BOX.match(element.text.strip()):
+                    continue
+                lattice = lattices.get(element.bbox.page)
+                row = lattice.row_of_element(element_id) if lattice else None
                 if row is not None:
                     rows.add((element.bbox.page, row))
             self.marker_rows[tab] = rows

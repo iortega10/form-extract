@@ -30,8 +30,8 @@ PIPELINE_VERSION = "5"
 
 #: 0.6.0-K1: the id of the `one_option_single` kind rule, recorded on a
 #: `Provenance` the rule re-derived and used as the cache-key token when the
-#: knob is off.
-KIND_RULE_VERSION = "1"
+#: knob is off. "2": a literal ASCII checkbox spelling in the draft's row is a marker.
+KIND_RULE_VERSION = "2"
 
 
 class RegionType(str, Enum):

@@ -309,9 +309,9 @@ field that already states an answer is left alone. Only a re-derived field's
 `provenance` gains `stated_control_type` (the model's kind) and `kind_rule`
 (`one_option_single`), so every other record serialises byte-identically;
 `SCHEMA_VERSION` stays `"2"`, `PIPELINE_VERSION` is `"5"`. Set `kind_rule=False`
-to leave the model's kind as stated (it still moves the instance cache key). One
-known limit: an unchecked lone box spelled `□`/`☐` is a classified marker, so it
-reads as `bool`; a literal ASCII `[ ]` is not a mark and reads as `text`.
+to leave the model's kind as stated (it still moves the instance cache key). A lone
+checkbox reads as `bool`, whether spelled with the unicode glyphs `□`/`☐` or
+with an ASCII box (`[ ]`, `[x]`, `( )`) at the start of a cell.
 
 **Pitfalls.**
 
