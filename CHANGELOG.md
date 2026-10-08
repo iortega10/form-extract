@@ -4,7 +4,13 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
-## 0.6.0rc1 (2026-10-08)
+## 0.6.0rc2 (2026-10-08)
+
+(`0.6.0rc1` was tagged but its release run failed CI before any upload, so nothing was published
+under that number. The failure: three tests pinned the zip bytes of generated gold workbooks, which
+vary with the interpreter's zlib; CPython 3.14 on Windows bundles zlib-ng. They now pin the
+uncompressed member contents, identical on 3.11 and 3.14, and keep the zip-byte tables for zlib-ng
+builds only.)
 
 **Release candidate, for testing on real forms.** Two things to know before you run it on your data:
 the one-option kind rule (`PipelineConfig.kind_rule`, see Added) is **on by default** and re-derives

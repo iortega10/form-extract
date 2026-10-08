@@ -427,11 +427,142 @@ def test_every_field_tag_has_at_least_six_dev_instances(gold):
         assert gold["dev_manifest"]["disposition_counts"][tag] >= 1
 
 
-def test_v2_tabs_are_byte_identical(gold):
-    for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
-        sha = gold[key]["tab_sha256"]
-        for tab, expected in OLD_TAB_SHA256[set_name].items():
+# --------------------------------------------------------------------------
+# Content hashes: what the tab-byte tables above pin, without the compressor.
+#
+# The zip bytes of a generated tab depend on the interpreter's zlib: CPython 3.14 on Windows
+# bundles zlib-ng and stock 3.11 / Linux builds do not, so the same workbook compresses to
+# different bytes (the release workflow's CI failed on exactly this, 2026-10-08, while the
+# UNCOMPRESSED members were identical on 3.11 and 3.14). The content hash below is sha256 over
+# every member's name and uncompressed bytes in name order. It was derived from the generator
+# in the environment where the three zip tables above still hold (the derivation asserted
+# that first), so it pins the same tabs. The zip-byte tables stay, checked only on a zlib-ng
+# build, where they are valid.
+# --------------------------------------------------------------------------
+
+import hashlib as _hashlib  # noqa: E402
+import zipfile as _zipfile  # noqa: E402
+import zlib as _zlib  # noqa: E402
+
+_ZLIB_NG = getattr(_zlib, "ZLIBNG_VERSION", None) is not None
+
+
+def _content_sha256(path) -> str:
+    with _zipfile.ZipFile(path) as archive:
+        digest = _hashlib.sha256()
+        for name in sorted(archive.namelist()):
+            digest.update(name.encode() + b"\x00" + archive.read(name) + b"\x00")
+    return digest.hexdigest()
+
+
+OLD_CONTENT_SHA256 = {
+    "dev": {
+        "Dev01": "606af82765a4e8c87904b2e0da58ea896df1ba04651c79b390877f0796c50f4a",
+        "Dev02": "2cdb0b921191aeabdadb88ee5fd5dbc4dbbf69544d681d459f940b63ad50fc70",
+        "Dev03": "54031b8c1fb66233786dddeef15523926b98dfaf4f53531c3af3d78d814b630a",
+        "Dev04": "31a97bd9738a0bab11d23fd5dd74f5e717e00217299ca75d7727084df9de889e",
+        "Dev05": "c9ef70fe5bac9ac0e135f3680b0789c659a67ab8d8cc79a807a6563945bca083",
+        "Dev06": "58338e9b608f62049e01e75209b55b8b9e4242cebb4fb12177c80ec6c1db3eed",
+        "Dev07": "f58f8298e2a8ad0b46876612831d34c4f970cc653e536ee8c6c5d0b8590f7a0a",
+        "Dev08": "d9ca2f74a9748afca0796b706c56e9d53a53544314b3e6a3a2e24fe88e8a841b",
+        "Dev09": "8a46e4966ba17625b18e9b19f223f93c56708db634e98adc8ef055282d9cb6b7",
+        "Dev10": "808756d30f9c609aba34ccc7386b32494669978afacfbc86fef16c3f751912a6",
+        "Dev11": "ac526e7eda8fbf87344d0a82d5c2ca0e2cc850fad0a0a72d463f1fcec7faf2aa",
+        "Dev12": "48f52997ea19559bba0a91fec06be85c0c4f54bd1fca5cae60f602490df54319",
+    },
+    "heldout": {
+        "Hold01": "aadaf907d5a8ba04c1f8f683df19793a24ebc08ce734debcfec5573fb77cd404",
+        "Hold02": "ed3f6b6a76ca431ebcc823336688a70697b19864f183e0148c08179ee6379871",
+        "Hold03": "7dba1133217bf0ab260b75f943eb4f1a3eefc3befeeb7d13b5f3f8593f1b462a",
+        "Hold04": "20f1acbe16b7ac8f4e60cbb41fc3c2672c27f5b295b2704f5cf7221f927880d1",
+        "Hold05": "e1d1d2bdf1b5d5447942607156aa2c9afd9863a6971ade936960b9e5a16f2d64",
+        "Hold06": "f7608301b1a478e9dba724e69f1591112ac2f31ebdd3d57bb2e9d893f78e2ad8",
+    },
+}
+
+V3_CONTENT_SHA256 = {
+    "dev": {
+        "Dev01": "606af82765a4e8c87904b2e0da58ea896df1ba04651c79b390877f0796c50f4a",
+        "Dev02": "8b7e60226f9644d05d4d411b61c0644dfe1e4d32c6bf833c258a647bbabbb1b5",
+        "Dev03": "16b60eef7e963e8d0fea99d01ddba11d21a5e400e371d79289bd75500bd976dc",
+        "Dev04": "6dbc54e6e58f5fc2aeb94cfb638eea42b7d98ed6b3389d4938ab5eca066c4f05",
+        "Dev05": "01db6afd59ff3dfc158da99ff933eeb4b2c1d4a252d9bfa650215e91e03a62b2",
+        "Dev06": "db7302d98eb64f5d3947667c6dfc72d82b8790a82be9467cb52a17591c58c8ea",
+        "Dev07": "1759ab6d5404cbecfbc464c49fbb3d21588a230da9db2c7f1c054c034fc5a408",
+        "Dev08": "1cc2eb1d84412fb9ea9da3b56823208906bae53419bae82b17183331995c459b",
+        "Dev09": "580e9c029b7e79975cd62b3c849829e1a3366f0bf2794f1c4780a162c598b9a5",
+        "Dev10": "0c080c30cb590e536874e80cc8cd775d5a9477dc8126f696d7781f0fa7e85912",
+        "Dev11": "bfd83699eeb0b31f67ad72d5282ed76c4ed3460481edd42fd16f7c6ac2655300",
+        "Dev12": "59d82a4a495bec266b990f204c92c9a2d661c81c7779d721367d13ccb343a1e7",
+        "Dev13": "2ed68c666e02309e288852967d0f67649685b163b8bcb41066c1eecad88592b8",
+        "Dev14": "dd5e5956efd79adedf0f5f18b05a2d27bab76a31b1bea6c5d449427bbf6d66bf",
+        "Dev15": "c254be120fa088ce02f3bfa8668b7d1616680c92cfa13882ff23ab07aaf9d27a",
+        "Dev16": "7378c95606a022d9a6d9ed36887f6fd74b0b097880bda77a802abae031a8f142",
+    },
+    "heldout": {
+        "Hold01": "a98488cac1771ef517a7e0ced1cffacec2ea032bd7f08066d7896a135e19d87c",
+        "Hold02": "511377efe784d39daa601029fbc4b5bab4d3c7f892b3aa18a164cf43aafa8004",
+        "Hold03": "fb990a39014d95dabe9e4e750f41167930b7c1bd1c6342bf1ac13693a26ba64d",
+        "Hold04": "23f7ba8335a1d092f58a8b47c6d4d4c2c251403e613024d61f745144b3f773db",
+        "Hold05": "e2bf383df139197051b41697e27835aeaae619a152dc698418f34cc9962a81f7",
+        "Hold06": "0bca95772700a02bc7ecede87815ec7a2a7295761166147b1ce10134cc373d74",
+        "Hold07": "1e2ed2613ffc54e56155b7c614efa05d1ffa1f7a6c03d6e1e77e774729d8ec25",
+        "Hold08": "4381328c3bebd561c274b195a7492c112cc4ec4f49427f785634bff0fccfc5da",
+    },
+}
+
+V4_CONTENT_SHA256 = {
+    "dev": {
+        "Dev01": "606af82765a4e8c87904b2e0da58ea896df1ba04651c79b390877f0796c50f4a",
+        "Dev02": "8b7e60226f9644d05d4d411b61c0644dfe1e4d32c6bf833c258a647bbabbb1b5",
+        "Dev03": "16b60eef7e963e8d0fea99d01ddba11d21a5e400e371d79289bd75500bd976dc",
+        "Dev04": "6dbc54e6e58f5fc2aeb94cfb638eea42b7d98ed6b3389d4938ab5eca066c4f05",
+        "Dev05": "01db6afd59ff3dfc158da99ff933eeb4b2c1d4a252d9bfa650215e91e03a62b2",
+        "Dev06": "db7302d98eb64f5d3947667c6dfc72d82b8790a82be9467cb52a17591c58c8ea",
+        "Dev07": "1759ab6d5404cbecfbc464c49fbb3d21588a230da9db2c7f1c054c034fc5a408",
+        "Dev08": "1cc2eb1d84412fb9ea9da3b56823208906bae53419bae82b17183331995c459b",
+        "Dev09": "580e9c029b7e79975cd62b3c849829e1a3366f0bf2794f1c4780a162c598b9a5",
+        "Dev10": "0c080c30cb590e536874e80cc8cd775d5a9477dc8126f696d7781f0fa7e85912",
+        "Dev11": "dfb3d9fd9009a0b796ebcac12a3b0e0532e272fa25da574b648186c4e02799b3",
+        "Dev12": "59d82a4a495bec266b990f204c92c9a2d661c81c7779d721367d13ccb343a1e7",
+        "Dev13": "2d9fc696a563b6c06fe65fa634fe84c3cc45a00d74e0bb995f2d688936bcb463",
+        "Dev14": "dd5e5956efd79adedf0f5f18b05a2d27bab76a31b1bea6c5d449427bbf6d66bf",
+        "Dev15": "c254be120fa088ce02f3bfa8668b7d1616680c92cfa13882ff23ab07aaf9d27a",
+        "Dev16": "7378c95606a022d9a6d9ed36887f6fd74b0b097880bda77a802abae031a8f142",
+    },
+    "heldout": {
+        "Hold01": "a98488cac1771ef517a7e0ced1cffacec2ea032bd7f08066d7896a135e19d87c",
+        "Hold02": "511377efe784d39daa601029fbc4b5bab4d3c7f892b3aa18a164cf43aafa8004",
+        "Hold03": "fb990a39014d95dabe9e4e750f41167930b7c1bd1c6342bf1ac13693a26ba64d",
+        "Hold04": "23f7ba8335a1d092f58a8b47c6d4d4c2c251403e613024d61f745144b3f773db",
+        "Hold05": "11fd17bf8d61caf33bf6f64c3617bdccc6bcfaeabe8cdb30de811f6438a2d775",
+        "Hold06": "0bca95772700a02bc7ecede87815ec7a2a7295761166147b1ce10134cc373d74",
+        "Hold07": "1e2ed2613ffc54e56155b7c614efa05d1ffa1f7a6c03d6e1e77e774729d8ec25",
+        "Hold08": "4381328c3bebd561c274b195a7492c112cc4ec4f49427f785634bff0fccfc5da",
+    },
+}
+
+
+def _check_content(fixture, table):
+    for set_name, dir_key in (("dev", "dev_dir"), ("heldout", "held_dir")):
+        for tab, expected in table[set_name].items():
+            got = _content_sha256(fixture[dir_key] / f"{tab}.xlsx")
+            assert got == expected, (tab, got, expected)
+
+
+def _check_zip(fixture, table, key_pairs=(("dev", "dev_manifest"), ("heldout", "held_manifest"))):
+    """The zip-byte tables hold only where the compressor matches the one that pinned them."""
+    if not _ZLIB_NG:
+        return
+    for set_name, key in key_pairs:
+        sha = fixture[key]["tab_sha256"]
+        for tab, expected in table[set_name].items():
             assert sha[tab] == expected, (tab, sha[tab], expected)
+
+
+def test_v2_tabs_are_byte_identical(gold):
+    _check_content(gold, OLD_CONTENT_SHA256)
+    _check_zip(gold, OLD_TAB_SHA256)
     for tab in make_gold.MIXED_DEV_TABS:
         assert tab not in OLD_TAB_SHA256["dev"]
 
@@ -440,8 +571,8 @@ def test_v3_tabs_have_a_committed_sha256_table(gold_v3):
     for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
         sha = gold_v3[key]["tab_sha256"]
         assert set(sha) == set(gold_v3[key]["tabs"])
-        for tab, expected in V3_TAB_SHA256[set_name].items():
-            assert sha[tab] == expected, (tab, sha[tab], expected)
+    _check_content(gold_v3, V3_CONTENT_SHA256)
+    _check_zip(gold_v3, V3_TAB_SHA256)
     # v3 changes only the wording: only the tab whose structures all keep the
     # plain question (Dev01, yes/no rows) keeps v2's bytes, so the table is not
     # merely the v2 table again.
@@ -469,8 +600,8 @@ def test_v4_tabs_have_a_committed_sha256_table(gold_v4):
     for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
         sha = gold_v4[key]["tab_sha256"]
         assert set(sha) == set(gold_v4[key]["tabs"])
-        for tab, expected in V4_TAB_SHA256[set_name].items():
-            assert sha[tab] == expected, (tab, sha[tab], expected)
+    _check_content(gold_v4, V4_CONTENT_SHA256)
+    _check_zip(gold_v4, V4_TAB_SHA256)
 
 
 def test_v4_leaves_non_matrix_tabs_byte_identical_to_v3(gold_v3, gold_v4):
