@@ -8,6 +8,30 @@ single schema version bump per output-changing release.
 
 ### Added
 
+- **Gold v4: the `matrix` tag becomes a real mark grid (`tools/make_gold.py`).**
+  Live dev runs scored `matrix` 0 of 7 under every variant because the gold was
+  unfair: all three matrix builders wrote ONE header cell (role `option`) plus,
+  per row, a typed value under it (role `answer`), so nothing on the sheet said
+  the header was an option or the typed value an answer to a single choice — the
+  model's reading (header = section heading, typed value = option) was
+  reasonable. v4 (opt-in, `--gold-version 4`; `GOLD_VERSION` stays **3**) rebuilds
+  `_tab_matrix_and_merged` (Dev11), `_blk_matrix` (mixed tabs) and
+  `_tab_hold_grid_matrix` (Hold05) as a header row of `MATRIX_OPTIONS` (3) option
+  cells from the set's option pool and, per row, a label in column 1 and one
+  `marker` cell under exactly one header. Gold per row: `kind=single`,
+  `option_cells=[the 3 headers]`, `selected_option_cells=[the header above the
+  mark]`, `expected_ambiguous=True` — a mark directly under a column header has
+  no `mark_precedes_option` neighbour (the layout classifies it `UNATTACHED`,
+  with no candidates), so the resolver cannot decide it; the field still counts as
+  `selected_ambiguous_expected`. v2 and v3 stay byte-identical (their builder
+  branches are untouched and the committed `OLD_TAB_SHA256`/`V3_TAB_SHA256`
+  tables pass); v4 differs from v3 only in the three tabs that hold a matrix, and
+  no tab after a matrix moves (each tab draws from its own seed-keyed RNG
+  stream). Per-tag field counts equal v3's (matrix 7 on dev, 3 held-out). New
+  `V4_TAB_SHA256` table, non-matrix byte-identity, per-tag-count and matrix-shape
+  tests in `tests/test_gold_scorer.py`; the dev set's selection pins in
+  `tests/test_060_lines_gold.py` are version-aware. No package code changes;
+  `PIPELINE_VERSION`, `PROMPT_VERSION` and `SCHEMA_VERSION` do not move.
 - **Style cue: a `fix2_style` lines variant and the `[shaded]` projection tag
   (`formextract/resolve.py`, `formextract/pipeline.py`).** The lines projection
   prints only cell text, so a typed answer (`Bracket outer 227`) and an option

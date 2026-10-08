@@ -374,7 +374,7 @@ mixed tabs leaves every homogeneous tab's bytes unchanged (a committed sha256
 table guards it). Regeneration is deterministic: the same `--seed` and `--set`
 produce byte-identical files.
 
-`--gold-version {2,3}` picks the gold schema. **3** (the default for a new set)
+`--gold-version {2,3,4}` picks the gold schema. **3** (the default for a new set)
 makes a field's **kind readable from the sheet**: a question label alone leaves
 `single` vs `multi` and `bool` vs `text` a coin flip, so every label carries a
 kind cue — multi-select and grid fields end `(select all that apply)`, the other
@@ -388,6 +388,17 @@ JSON, byte for byte, and omits `kind_cue`. A v3 set has the same fields, cells
 and selections as its v2 twin — only the label wording changes — so the two
 versions score identically on a perfect response and differ only in what a model
 can read off the sheet.
+
+**4** is opt-in (`--gold-version 4`; the default stays 3) and rebuilds only the
+`matrix` tag as an ordinary mark grid: a header row of three option cells drawn
+from the set's own option pool and, per row, a label in column 1 plus one
+`marker` cell under exactly one header. Every matrix field is `kind=single` with
+the three headers as its option cells, and carries `expected_ambiguous` — a mark
+directly under a column header has no `mark_precedes_option` neighbour (the
+layout classifies it `UNATTACHED`, with no candidates) so the resolver cannot
+decide it. v2 and v3 are untouched, byte for byte; v4 differs from v3 only in the
+tabs that hold a matrix (`Dev11`, the mixed `Dev13`, `Hold05`), because each tab
+draws from its own seed-keyed RNG stream.
 
 *2026-10-07 (G3b)* — the typed-value fields (gold kind `bool`) keep the plain
 question of v2 rather than the noun phrase described above: a noun phrase under a

@@ -93,6 +93,32 @@ def gold_v3(tmp_path_factory):
     }
 
 
+@pytest.fixture(scope="module")
+def gold_v4(tmp_path_factory):
+    """The gold v4 set (opt-in): the matrix tag is a K-option header row with
+    one ``marker`` per label row, and every matrix field is ``expected_ambiguous``."""
+    base = tmp_path_factory.mktemp("gold-v4")
+    dev_dir = base / "dev"
+    held_dir = base / "heldout"
+    dev_gold, dev_manifest, _ = make_gold.build_set(
+        "dev", make_gold.DEFAULT_SEEDS["dev"], dev_dir, gold_version=4
+    )
+    held_gold, held_manifest, _ = make_gold.build_set(
+        "heldout", make_gold.DEFAULT_SEEDS["heldout"], held_dir, gold_version=4
+    )
+    make_gold.write_canned(dev_gold, dev_dir / "canned")
+    make_gold.write_canned(held_gold, held_dir / "canned")
+    return {
+        "base": base,
+        "dev_dir": dev_dir,
+        "held_dir": held_dir,
+        "dev_gold": dev_gold,
+        "dev_manifest": dev_manifest,
+        "held_gold": held_gold,
+        "held_manifest": held_manifest,
+    }
+
+
 def _workbook_cells(path: Path) -> dict[str, str]:
     wb = openpyxl.load_workbook(filename=str(path))
     out: dict[str, str] = {}
@@ -196,6 +222,42 @@ V3_TAB_SHA256 = {
         "Hold03": "b2ac4e01ee85ed1e9e4e10d7886f28c9bd9c7c063ba84582fc266c729ee01872",
         "Hold04": "10dca1d00f99facedfdbe7183652ec6ed6545fa1a113f3beb71e5c4056b18ec3",
         "Hold05": "2b5f1bfa115f91cf113ab99e976dcbe84fee7350e7be308f701f5778d2116cfd",
+        "Hold06": "2bc9ccd7942b0ced59776eec68f0827110dad0fa74d3ec38d7ec7ab5aa37fa3e",
+        "Hold07": "78538ab01f26f5871d82f6f405c6e9439f5b6afdd2ed0bee4c72853c61c9abc2",
+        "Hold08": "b0ad4c4fdda65d8989709f3557432b2613dd1c593a116804e0e9055178836678",
+    },
+}
+
+#: sha256 of every tab of the gold v4 set (opt-in). v4 rebuilds only the
+#: ``matrix`` tag, so exactly the three tabs that hold a matrix (Dev11, the mixed
+#: Dev13, Hold05) differ from v3; every other tab is byte-identical because each
+#: tab draws from its own seed-keyed RNG stream. These rows pin the generated
+#: bytes the same way OLD_TAB_SHA256 and V3_TAB_SHA256 do.
+V4_TAB_SHA256 = {
+    "dev": {
+        "Dev01": "2dc20f1c91027f95bcf839b75bbcb9b95392894c9a0e530d9dcb81771d232cf9",
+        "Dev02": "6b2238999ccc1d5c9e50a979237a3a4006db8d4d193daf4e4c9be03a794d3c53",
+        "Dev03": "6b779a6fe0844484f270c3186cb7ff6c79934f148f5e44e036c09c999b7a8398",
+        "Dev04": "554d9124d29707bf5910c51682a6361ab368217ce2e6d45d9796e7a06c3eccbc",
+        "Dev05": "25b70dbd5507134040c8e29e1f7cb40b2b653cfc293c2d21b283b84b62e2f842",
+        "Dev06": "deef816dcd986e998e70141f25aff0c57159933512e59d1228bc53c470866563",
+        "Dev07": "26b5522b082b6dd2ffb60748b518bdd2bb6d7c47eb008761131c3eccabcd44be",
+        "Dev08": "470f2fcd20d6a124248ce6a9309d595478f6e1c2fbb463924e24f099bf6e8b3b",
+        "Dev09": "6555763fac0a129ecb9e0db24954cc9d7e7ca037e557425960c80561f5abd8ed",
+        "Dev10": "233e1085bd7026abbc9d98d891ead8eabcbe26c4e4a694fd8978a1a03df93f44",
+        "Dev11": "0d9c048296dac8f4e2746bdc6fb163974fba43f66b0f731c3da671de462867f6",
+        "Dev12": "b2b2a4faae1b1dce44d63df187e20287425f22554f9d79e2436f220c8110ca3f",
+        "Dev13": "2eb8de4943d6e361d2a09eb25600bdbde6d8e264b5c67ba3f45cad2de0285694",
+        "Dev14": "b8f7bb1e095327bf181d2cdb7449b7d894d096ea15447183611fc04247e6d7d0",
+        "Dev15": "231297fbacee9c775c32fa539d971ec4788ac28624fd733a41b64fb155c01b67",
+        "Dev16": "dae6a55c166c1215c42fcd034422edcfc3b7b23aa4c5d09d32fccc5d806cbc6a",
+    },
+    "heldout": {
+        "Hold01": "69d51aefc118e4b12b4b04ad32220f6baeee542b996abebac6675b8f03e2401a",
+        "Hold02": "d86ad118394207274c6b883a04a4c95cf49f3e1126d4d05887a40684b9abadb4",
+        "Hold03": "b2ac4e01ee85ed1e9e4e10d7886f28c9bd9c7c063ba84582fc266c729ee01872",
+        "Hold04": "10dca1d00f99facedfdbe7183652ec6ed6545fa1a113f3beb71e5c4056b18ec3",
+        "Hold05": "62eae9dc0de037010e5ded405d14ac51295e9c001f8e02e0ca54932ea6901482",
         "Hold06": "2bc9ccd7942b0ced59776eec68f0827110dad0fa74d3ec38d7ec7ab5aa37fa3e",
         "Hold07": "78538ab01f26f5871d82f6f405c6e9439f5b6afdd2ed0bee4c72853c61c9abc2",
         "Hold08": "b0ad4c4fdda65d8989709f3557432b2613dd1c593a116804e0e9055178836678",
@@ -401,6 +463,112 @@ def test_v3_field_counts_per_tag_equal_v2(gold, gold_v3):
     assert gold["dev_manifest"]["tag_counts"] == gold_v3["dev_manifest"]["tag_counts"]
     assert gold["held_manifest"]["fields"] == gold_v3["held_manifest"]["fields"]
     assert gold["held_manifest"]["tag_counts"] == gold_v3["held_manifest"]["tag_counts"]
+
+
+def test_v4_tabs_have_a_committed_sha256_table(gold_v4):
+    for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
+        sha = gold_v4[key]["tab_sha256"]
+        assert set(sha) == set(gold_v4[key]["tabs"])
+        for tab, expected in V4_TAB_SHA256[set_name].items():
+            assert sha[tab] == expected, (tab, sha[tab], expected)
+
+
+def test_v4_leaves_non_matrix_tabs_byte_identical_to_v3(gold_v3, gold_v4):
+    """Only the tabs that themselves hold a matrix may move; the rest are v3.
+
+    Each tab draws from its own seed-keyed RNG stream, so rebuilding the matrix
+    builders cannot perturb a tab that does not run one.
+    """
+    for set_name, key in (("dev", "dev_manifest"), ("heldout", "held_manifest")):
+        doc = gold_v4[f"{'dev' if set_name == 'dev' else 'held'}_gold"]
+        matrix_tabs = {f["tab"] for f in doc["fields"] if "matrix" in f["tags"]}
+        v4_sha = gold_v4[key]["tab_sha256"]
+        v3_sha = gold_v3[key]["tab_sha256"]
+        for tab in gold_v4[key]["tabs"]:
+            if tab in matrix_tabs:
+                assert v4_sha[tab] != v3_sha[tab], tab
+            else:
+                assert v4_sha[tab] == v3_sha[tab], tab
+    dev_matrix = {
+        f["tab"] for f in gold_v4["dev_gold"]["fields"] if "matrix" in f["tags"]
+    }
+    held_matrix = {
+        f["tab"] for f in gold_v4["held_gold"]["fields"] if "matrix" in f["tags"]
+    }
+    assert dev_matrix == {"Dev11", "Dev13"}
+    assert held_matrix == {"Hold05"}
+
+
+def test_v4_field_counts_per_tag_equal_v3(gold_v3, gold_v4):
+    """v4 changes the matrix shape, not how many matrix rows a tab holds."""
+    assert gold_v3["dev_manifest"]["fields"] == gold_v4["dev_manifest"]["fields"]
+    assert gold_v3["dev_manifest"]["tab_counts"] == gold_v4["dev_manifest"]["tab_counts"]
+    assert gold_v3["dev_manifest"]["tag_counts"] == gold_v4["dev_manifest"]["tag_counts"]
+    assert gold_v3["held_manifest"]["fields"] == gold_v4["held_manifest"]["fields"]
+    assert gold_v3["held_manifest"]["tag_counts"] == gold_v4["held_manifest"]["tag_counts"]
+    assert gold_v4["dev_manifest"]["tag_counts"]["matrix"] == 7
+    assert gold_v4["held_manifest"]["tag_counts"]["matrix"] == 3
+
+
+def _rc(cell_id: str) -> tuple[int, int]:
+    _, rc = cell_id.split("!", 1)
+    row, col = rc.split(":", 1)
+    return int(row), int(col)
+
+
+def test_v4_dev_and_heldout_vocabularies_are_disjoint(gold_v4):
+    dev = _label_option_texts(gold_v4["dev_gold"])
+    held = _label_option_texts(gold_v4["held_gold"])
+    assert dev & held == set()
+
+
+def test_v4_matrix_is_a_header_row_of_options_with_one_mark_per_label(gold_v4):
+    """Every v4 matrix row: K option cells in one header row above the labels,
+    exactly one marker under the selected header, and an expected-ambiguous gold."""
+    for doc in (gold_v4["dev_gold"], gold_v4["held_gold"]):
+        cells = {c["id"]: c for c in doc["cells"]}
+        fields = doc["fields"]
+        # The scorer keys a field by label + option cells: a duplicate identity
+        # would silently make a gold field unreachable (a negative kind_confusion).
+        identities = {
+            (f["tab"], frozenset(f["label_cells"] + f["option_cells"])) for f in fields
+        }
+        assert len(identities) == len(fields)
+
+        by_tab: dict[str, list[dict]] = {}
+        for f in fields:
+            if "matrix" in f["tags"]:
+                by_tab.setdefault(f["tab"], []).append(f)
+        assert by_tab, "no matrix fields"
+        for tab, group in by_tab.items():
+            # one shared header row of K >= 2 options, the same on every row
+            assert len({tuple(f["option_cells"]) for f in group}) == 1, tab
+            headers = group[0]["option_cells"]
+            assert len(headers) >= 2, tab
+            header_rows = {_rc(c)[0] for c in headers}
+            assert len(header_rows) == 1, tab
+            header_row = header_rows.pop()
+            assert all(cells[c]["role"] == "option" for c in headers), tab
+            for f in group:
+                assert f["kind"] == "single", f
+                assert f["expected_ambiguous"] is True, f
+                assert f["kind_cue"] == "choose_one", f
+                assert cells[f["label_cells"][0]]["text"].endswith("(choose one)"), f
+                row, col = _rc(f["label_cells"][0])
+                assert col == 1 and row > header_row, f
+                selected = f["selected_option_cells"]
+                assert len(selected) == 1 and selected[0] in f["option_cells"], f
+                marker_id = f"{tab}!{row}:{_rc(selected[0])[1]}"
+                assert marker_id in cells, (f["field_id_gold"], marker_id)
+                assert cells[marker_id]["role"] == "marker", marker_id
+                assert cells[marker_id]["text"] == make_gold.MARKER, marker_id
+                assert marker_id not in f["option_cells"], f
+            # each matrix label row carries its own marker (never a shared one)
+            marker_ids = [
+                f"{tab}!{_rc(f['label_cells'][0])[0]}:{_rc(f['selected_option_cells'][0])[1]}"
+                for f in group
+            ]
+            assert len(set(marker_ids)) == len(group), (tab, marker_ids)
 
 
 def test_v2_gold_has_no_kind_cue_and_v3_has_one(gold, gold_v3):

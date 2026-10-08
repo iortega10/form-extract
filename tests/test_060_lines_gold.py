@@ -175,9 +175,16 @@ def test_marker_rows_that_geometry_cannot_derive(dev_scored):
     the mark belongs to. With no model-side ``selected`` on the lines path the
     field ends up ambiguous and loses every mark. Every number below is the
     measured consequence; the doc note records the cause and the json contrast.
+
+    v4 moves two of these counts (and ``unexpected_ambiguous`` 42 -> 44): the
+    mixed Dev13 holds a matrix block whose v4 builder consumes a different number
+    of RNG values, so the blocks *after it in that same tab* re-drew and two of
+    its affirm/dissent rows flipped into the competing case. No tab after a matrix
+    moved - each tab draws from its own seed-keyed stream - and the matrix tag
+    itself contributes zero unexpected ambiguity (it is ``expected_ambiguous``).
     """
-    _, res = dev_scored
-    pinned = {
+    dev, res = dev_scored
+    v23 = {
         "dense_multi": (3, 10),
         "grid_50": (0, 10),
         "yes_no_row": (37, 70),
@@ -185,23 +192,46 @@ def test_marker_rows_that_geometry_cannot_derive(dev_scored):
         "non_answer_column": (5, 11),
         "mixed_tab": (54, 90),
     }
+    v4 = {
+        "dense_multi": (3, 10),
+        "grid_50": (0, 10),
+        "yes_no_row": (35, 70),
+        "gutter_column": (3, 8),
+        "non_answer_column": (5, 11),
+        "mixed_tab": (52, 90),
+    }
+    pinned = v4 if dev.gold["gold_version"] >= 4 else v23
     for tag, (ok, total) in pinned.items():
         sub = res["per_tag"][tag]
         assert (sub["selected_ok"], sub["selected_total"]) == (ok, total), tag
-    assert res["overall"]["unexpected_ambiguous"] == 42
-    assert res["overall"]["selected_ok"] == 100
+    if dev.gold["gold_version"] >= 4:
+        assert res["overall"]["unexpected_ambiguous"] == 44
+        assert res["overall"]["selected_ok"] == 98
+        # the matrix tag itself keeps no unexpected ambiguity
+        assert res["per_tag"]["matrix"]["unexpected_ambiguous"] == 0
+    else:
+        assert res["overall"]["unexpected_ambiguous"] == 42
+        assert res["overall"]["selected_ok"] == 100
     assert res["overall"]["selected_total"] == 180
 
 
 def test_side_by_side_shared_marker_is_the_expected_ambiguity(dev_scored):
-    """The gold's ``expected_ambiguous`` pair is not read as a missing convention."""
-    _, res = dev_scored
+    """The gold's ``expected_ambiguous`` pair is not read as a missing convention.
+
+    v4 adds one expected-ambiguous gold field per matrix row (7 on dev), so the
+    overall count rises by exactly the matrix field count; the side-by-side pair
+    itself is unchanged (Dev04 is byte-identical to v3).
+    """
+    dev, res = dev_scored
     sub = res["per_tag"]["side_by_side"]
     assert sub["unexpected_ambiguous"] == 0
     assert sub["selected_ambiguous_expected"] == 2
     assert sub["selected_ok"] == 12
     assert sub["selected_total"] == 22
-    assert res["overall"]["selected_ambiguous_expected"] == 10
+    expected = 10
+    if dev.gold["gold_version"] >= 4:
+        expected += sum(1 for f in dev.gold["fields"] if "matrix" in f["tags"])
+    assert res["overall"]["selected_ambiguous_expected"] == expected
 
 
 # --------------------------------------------------------------------------

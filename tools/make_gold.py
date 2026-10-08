@@ -42,8 +42,13 @@ GOLD_VERSION = 3
 #: The gold-set versions the generator can reproduce. ``2`` is frozen: its tabs
 #: and its gold JSON are byte-identical to what the previous turns shipped (a
 #: committed sha256 table asserts the tab bytes). ``3`` is the current default
-#: and adds the kind cue below.
-GOLD_VERSIONS = (2, 3)
+#: and adds the kind cue below. ``4`` is opt-in and rebuilds the ``matrix`` tag
+#: as an ordinary mark grid: a header row of ``MATRIX_OPTIONS`` option cells and,
+#: per row, one label plus one ``marker`` cell under exactly one of those
+#: headers. The gold rows carry ``expected_ambiguous`` (a mark under a header has
+#: no ``mark_precedes_option`` neighbour, so the resolver cannot decide it), and
+#: only the tabs that hold a matrix differ from their v3 bytes.
+GOLD_VERSIONS = (2, 3, 4)
 
 #: The clock is pinned so regeneration is byte-identical; the zip is repacked
 #: with a fixed date_time so openpyxl's mtime never leaks into the bytes.
@@ -377,6 +382,9 @@ GRID_N = 3
 GRID_ROWS = 5
 GRID_COLS = 10
 MATRIX_N = 6
+#: gold v4: the number of column options a matrix header row carries (K). A
+#: matrix row is a label plus one ``marker`` under exactly one of these.
+MATRIX_OPTIONS = 3
 MERGED_N = 6
 GUTTER_N = 6
 NON_ANSWER_N = 8
@@ -631,19 +639,39 @@ def _tab_matrix_and_merged(s: Sheet) -> None:
     row = 1
     s.dispose(row, 1, s.words.header(), "hdr")
     row += 1
-    header = s.put(row, 2, s.words.header(), "option")
-    row += 1
-    for _ in range(MATRIX_N):
-        lid = s.label(row, 1, "matrix")
-        ans = s.put(row, 2, s.words.typed_value(), "answer")
-        s.field(
-            kind="single",
-            label_cells=[lid],
-            option_cells=[header],
-            answer_cells=[ans],
-            tags=["matrix"],
-        )
+    if s.version >= 4:
+        header_ids = [
+            s.put(row, 2 + j, text, "option")
+            for j, text in enumerate(s.words.options(MATRIX_OPTIONS))
+        ]
         row += 1
+        for _ in range(MATRIX_N):
+            lid = s.label(row, 1, "matrix")
+            sel = s.words.rng.randint(0, MATRIX_OPTIONS - 1)
+            s.put(row, 2 + sel, MARKER, "marker")
+            s.field(
+                kind="single",
+                label_cells=[lid],
+                option_cells=header_ids,
+                selected_option_cells=[header_ids[sel]],
+                tags=["matrix"],
+                expected_ambiguous=True,
+            )
+            row += 1
+    else:
+        header = s.put(row, 2, s.words.header(), "option")
+        row += 1
+        for _ in range(MATRIX_N):
+            lid = s.label(row, 1, "matrix")
+            ans = s.put(row, 2, s.words.typed_value(), "answer")
+            s.field(
+                kind="single",
+                label_cells=[lid],
+                option_cells=[header],
+                answer_cells=[ans],
+                tags=["matrix"],
+            )
+            row += 1
     for _ in range(MERGED_N):
         s.ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=2)
         lid = s.label(row, 1, "merged_tall")
@@ -962,6 +990,26 @@ def _blk_grid(s: Sheet, row: int, n: int) -> int:
 
 
 def _blk_matrix(s: Sheet, row: int, n: int) -> int:
+    if s.version >= 4:
+        header_ids = [
+            s.put(row, 2 + j, text, "option")
+            for j, text in enumerate(s.words.options(MATRIX_OPTIONS))
+        ]
+        row += 1
+        for _ in range(n):
+            lid = s.label(row, 1, "matrix")
+            sel = s.words.rng.randint(0, MATRIX_OPTIONS - 1)
+            s.put(row, 2 + sel, MARKER, "marker")
+            s.field(
+                kind="single",
+                label_cells=[lid],
+                option_cells=header_ids,
+                selected_option_cells=[header_ids[sel]],
+                tags=["matrix", _MIXED_TAG],
+                expected_ambiguous=True,
+            )
+            row += 1
+        return row
     header = s.put(row, 2, s.words.header(), "option")
     row += 1
     for _ in range(n):
@@ -1335,6 +1383,26 @@ def _tab_hold_grid_matrix(s: Sheet) -> None:
             tags=["grid_50"],
         )
         row += GRID_ROWS
+    if s.version >= 4:
+        header_ids = [
+            s.put(row, 2 + j, text, "option")
+            for j, text in enumerate(s.words.options(MATRIX_OPTIONS))
+        ]
+        row += 1
+        for _ in range(3):
+            lid = s.label(row, 1, "matrix")
+            sel = s.words.rng.randint(0, MATRIX_OPTIONS - 1)
+            s.put(row, 2 + sel, MARKER, "marker")
+            s.field(
+                kind="single",
+                label_cells=[lid],
+                option_cells=header_ids,
+                selected_option_cells=[header_ids[sel]],
+                tags=["matrix"],
+                expected_ambiguous=True,
+            )
+            row += 1
+        return
     header = s.put(row, 2, s.words.header(), "option")
     row += 1
     for _ in range(3):
@@ -1926,10 +1994,11 @@ def main(argv=None) -> int:
         choices=GOLD_VERSIONS,
         default=GOLD_VERSION,
         dest="gold_version",
-        metavar="{2,3}",
+        metavar="{2,3,4}",
         help="gold schema: 3 (default) writes the kind cue into every label and "
         "records kind_cue; 2 is frozen and reproduces the previous sets byte for "
-        "byte",
+        "byte; 4 rebuilds the matrix tag as a K-option header row with one mark "
+        "per row and is opt-in",
     )
     parser.add_argument(
         "--canned-lines",
