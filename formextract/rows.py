@@ -133,6 +133,33 @@ def _group_by_top_edge(bands: Sequence[_BandInfo], tolerance: float) -> list[lis
     return groups
 
 
+def _shorten_mixed_bands(
+    band_infos: Sequence[_BandInfo],
+    elements_by_id: Mapping[str, Element],
+    threshold: float,
+) -> list[_BandInfo]:
+    """A band that is tall only because one cell in it is a tall merged cell,
+    but that also holds an ordinary-height cell (a merged label beside its own
+    one-row answer), is a row of its own: its extent for placement is that of
+    its ordinary cells, so it joins the short rows by its top edge. Left tall,
+    a stack of such bands has no short band between them and every one of them
+    falls into the row above, fusing several sheet rows into one lattice row.
+    A band that is one tall cell, or only tall cells, is unchanged."""
+    out: list[_BandInfo] = []
+    for info in band_infos:
+        column, band_id, y0, y1, element_ids = info
+        if y1 - y0 <= threshold:
+            out.append(info)
+            continue
+        present = [elements_by_id[e] for e in element_ids if e in elements_by_id]
+        ordinary = [e for e in present if e.bbox.height <= threshold]
+        if not ordinary or len(ordinary) == len(present):
+            out.append(info)
+            continue
+        out.append((column, band_id, y0, max(e.bbox.y1 for e in ordinary), element_ids))
+    return out
+
+
 def _assign_tall(
     groups: list[list[_BandInfo]], tall: Sequence[_BandInfo]
 ) -> tuple[list[_BandInfo], list[_BandInfo]]:
@@ -209,6 +236,8 @@ def build_rows(
     band_heights = [y1 - y0 for (_c, _b, y0, y1, _e) in band_infos if y1 - y0 > 0]
     median_band = statistics.median(band_heights) if band_heights else _DEFAULT_MEDIAN
     threshold = SHORT_BAND_FACTOR * median_band
+
+    band_infos = _shorten_mixed_bands(band_infos, elements_by_id, threshold)
 
     short = [bi for bi in band_infos if bi[3] - bi[2] <= threshold]
     tall = [bi for bi in band_infos if bi[3] - bi[2] > threshold]

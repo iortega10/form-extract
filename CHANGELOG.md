@@ -8,6 +8,26 @@ single schema version bump per output-changing release.
 
 ### Added
 
+- **Row lattice: stacked merged-label pairs no longer fuse (`formextract/rows.py`).**
+  A band holding a tall merged label beside its own one-row answer is tall only
+  because of the merge. With no short band between such bands, every one of them
+  fell into the short row above and several sheet rows became one lattice row
+  (gold Dev13: seven worksheet rows in one prompt row, so the model read three
+  independent text fields as one multi-select). A tall band that also holds an
+  ordinary-height cell now takes that cell's extent for placement
+  (`_shorten_mixed_bands`), so it joins the short rows by its top edge; a lone
+  merged cell, or a band of only tall cells, is unchanged. New regression test
+  `test_stacked_tall_pairs_do_not_fuse_into_one_row` (fails on the old code). On
+  the dev gold set, lines contract, `fix2`, `merged_tall` grouping goes from 0 to
+  18 of 18 fields (`matched_ignoring_kind`). Unreleased, so `PIPELINE_VERSION`
+  is not moved; the call cache keys on prompt text, so changed prompts miss.
+- **Probe pacing and error visibility (`tools/live_probe.py`).** `--min-interval
+  SECONDS` (with `--gold`) starts provider calls at least that far apart,
+  whatever `--workers` is, so a free-tier quota is not hit by a burst (6 seconds
+  stays under 10 requests a minute). The gold output gains
+  `http_status_counts` (`{"429": 1}`, status codes only, never a body) and
+  `incomplete_tabs` (tabs whose record was not `complete`), so a rate limit is
+  told apart from a bad request. No call is retried.
 - **Row lattice, a derived view (`formextract/rows.py`).** A page-global lattice
   over the existing layout bands, the coordinate the 0.6.0 line contract will
   cite cells by (`row.seg`). `build_rows(layout, elements_by_id, *, page)` groups

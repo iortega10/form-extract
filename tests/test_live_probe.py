@@ -818,7 +818,12 @@ def test_gold_mode_output_is_numbers_only(gold_dir, capsys):
     assert len(lines) == 1
     data = json.loads(lines[0])
     for key, value in data.items():
-        if key in ("per_tag", "finish_reason_class_counts", "kind_confusion_pairs"):
+        if key in (
+            "per_tag",
+            "finish_reason_class_counts",
+            "kind_confusion_pairs",
+            "http_status_counts",
+        ):
             for inner in value.values():
                 assert isinstance(inner, (int, dict))
             continue
@@ -865,6 +870,27 @@ def test_gold_mode_401_body_echo_is_redacted(gold_dir, capsys, monkeypatch):
     assert data["http_error_class"] == "4xx"
     assert data["matched"] == 0
     assert state["counts"].get("e401") == len(gold_doc["tabs"])
+    # the status code and the failed-tab count are numbers, so a rate limit is
+    # distinguishable from a bad request without reading a body
+    assert data["http_status_counts"] == {"401": len(gold_doc["tabs"])}
+    assert data["incomplete_tabs"] == len(gold_doc["tabs"])
+
+
+def test_gold_mode_min_interval_paces_the_calls(gold_dir, capsys):
+    """--min-interval spaces call starts apart; the default never sleeps."""
+    gold_path, gold_doc = gold_dir
+    bodies = _gold_payloads(gold_path, gold_doc)
+    interval = 0.3
+    with _scripted_server(bodies) as (_server, base, state):
+        code = _run(_gold_args(base, gold_path, "--min-interval", str(interval)))
+        out, _err = capsys.readouterr()
+
+    assert code == 0
+    data = _last_line(out)
+    assert data["calls"] >= 2
+    assert data["seconds"] >= (data["calls"] - 1) * interval
+    assert data["http_status_counts"] == {}
+    assert data["incomplete_tabs"] == 0
 
 
 def test_gold_mode_manifest_mismatch_exits_two(gold_dir, tmp_path, capsys):

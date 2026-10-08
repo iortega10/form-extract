@@ -453,6 +453,10 @@ python tools/live_probe.py --gold gold --provider gemini --model gemini-2.5-flas
 python tools/score_gold.py --gold gold/gold_dev.json --record record.json --json
 ```
 
+On a rate-limited (free) key add `--min-interval 6`: calls start at least that many
+seconds apart, and the output's `http_status_counts` / `incomplete_tabs` show
+whether any call was refused (nothing is retried).
+
 `live_probe.py --gold DIR` takes a directory made by `make_gold.py --out`, runs
 each tab's `.xlsx` through the real `Pipeline` with the gold's own conventions
 declared, a throwaway store and `--workers` as `chunk_workers`, refuses (exit 2) a

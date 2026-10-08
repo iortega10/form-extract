@@ -16,7 +16,7 @@ Usage:
         [--tiny] [--dump PATH] [--prompt-variant NAME]
     python tools/live_probe.py --gold DIR --provider openai --model gpt-4o-mini
         [--contract json|lines] [--prompt-variant NAME] [--workers N]
-        [--record-out PATH]
+        [--record-out PATH] [--min-interval SECONDS]
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ import socket
 import statistics
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -321,6 +322,7 @@ def call_provider(
         body = _openai_body(model, prompt, params, max_tokens)
     result: dict[str, Any] = {
         "http_error": "none",
+        "http_status": None,
         "content": "",
         "finish_class": "none",
         "prompt_tokens": None,
@@ -344,6 +346,7 @@ def call_provider(
         return result
     if status >= 400:
         result["http_error"] = _http_error_class(status)
+        result["http_status"] = status
         return result
     try:
         content, finish, prompt_tokens, output_tokens, reasoning_tokens = (
@@ -655,8 +658,12 @@ class _ProviderError(Exception):
 class _ProviderClient:
     """The probe's provider-backed ``LLMClient`` plus its call accounting."""
 
-    def __init__(self, *, provider, base_url, key, max_tokens):
+    def __init__(self, *, provider, base_url, key, max_tokens, min_interval=0.0):
         self.provider = provider
+        self.min_interval = min_interval
+        self._last_call = None
+        self._pace = threading.Lock()
+        self.status_counts: dict[str, int] = {}
         self.base_url = base_url
         self.key = key
         self.max_tokens = max_tokens
@@ -670,14 +677,27 @@ class _ProviderClient:
         self.finish_counts = {name: 0 for name in FINISH_CLASSES}
         self.truncated = 0
         self.http_error_class = "none"
+        self.incomplete_tabs = 0
 
     def complete(
         self, prompt: str, *, model: str, params: dict[str, Any]
     ) -> LLMResponse:
+        if self.min_interval > 0:
+            # Free-tier pacing: calls start at least ``min_interval`` seconds apart,
+            # whatever ``workers`` is. The lock is held through the sleep on purpose.
+            with self._pace:
+                if self._last_call is not None:
+                    wait = self.min_interval - (time.monotonic() - self._last_call)
+                    if wait > 0:
+                        time.sleep(wait)
+                self._last_call = time.monotonic()
         call = call_provider(
             self.provider, self.base_url, self.key, model, prompt, params, self.max_tokens
         )
         self.calls += 1
+        if call["http_status"] is not None:
+            code = str(call["http_status"])
+            self.status_counts[code] = self.status_counts.get(code, 0) + 1
         self.finish_counts[call["finish_class"]] += 1
         if call["prompt_tokens"] is not None:
             self.prompt_tokens += call["prompt_tokens"]
@@ -752,7 +772,7 @@ def _score_gold(gold_doc: dict, dump: dict) -> dict:
 
 def run_gold_once(
     *, gold_dir, provider, base_url, key, model, params, max_tokens, workers,
-    contract="json", prompt_variant="base",
+    contract="json", prompt_variant="base", min_interval=0.0,
 ) -> tuple[dict, dict, "_ProviderClient", float]:
     """Run every gold tab through the real Pipeline.
 
@@ -776,9 +796,11 @@ def run_gold_once(
         prompt_variant=prompt_variant,
     )
     client = _ProviderClient(
-        provider=provider, base_url=base_url, key=key, max_tokens=max_tokens
+        provider=provider, base_url=base_url, key=key, max_tokens=max_tokens,
+        min_interval=min_interval,
     )
     fields: list = []
+    incomplete = 0
     workdir = Path(tempfile.mkdtemp(prefix="probe-gold-"))
     started = time.perf_counter()
     try:
@@ -786,9 +808,12 @@ def run_gold_once(
         for tab in gold_doc["tabs"]:
             record = Pipeline(store, client, config).run(gold_dir / f"{tab}.xlsx")
             fields.extend(record.fields)
+            if record.status.value != "complete":
+                incomplete += 1
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     seconds = time.perf_counter() - started
+    client.incomplete_tabs = incomplete
     return {"fields": [to_dict(field) for field in fields]}, gold_doc, client, seconds
 
 
@@ -821,6 +846,8 @@ def _gold_output(
         "finish_reason_class_counts": dict(client.finish_counts),
         "truncated_count": client.truncated,
         "http_error_class": client.http_error_class,
+        "http_status_counts": dict(client.status_counts),
+        "incomplete_tabs": client.incomplete_tabs,
         "gold_fields": o["gold_fields"],
         "predicted_fields": o["predicted_fields"],
         "matched": o["matched"],
@@ -868,6 +895,7 @@ def _execute_gold(args, key: str, base_url: str, params: dict[str, Any]) -> dict
         workers=args.workers,
         contract=args.contract,
         prompt_variant=args.prompt_variant,
+        min_interval=args.min_interval,
     )
     if args.record_out:
         with open(args.record_out, "w", encoding="utf-8") as handle:
@@ -915,6 +943,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--min-interval",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="--gold only: start provider calls at least this many seconds apart "
+        "(free-tier pacing; 6 stays under 10 requests a minute)",
+    )
     parser.add_argument(
         "--no-temperature",
         action="store_true",

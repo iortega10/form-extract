@@ -91,6 +91,29 @@ def _fx_tall_merged(root: Path):
     return out
 
 
+def _fx_tall_labelled_answers(root: Path):
+    """A header, then stacked pairs of a two-row merged label and its own one-row
+    answer. Each pair's band is tall only because of the merge, and no short band
+    sits between the pairs (Dev13 of the gold set)."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "TallPairs"
+    ws.column_dimensions["B"].width = 20.0
+    ws["A1"] = "Section"
+    for i in range(3):
+        top = 2 + 2 * i
+        ws.merge_cells(start_row=top, start_column=1, end_row=top + 1, end_column=2)
+        ws.cell(row=top, column=1, value=f"Merged label {i}")
+        ws.cell(row=top, column=4, value=f"Answer {i}")
+    ws.cell(row=8, column=1, value="Closing note")
+    # Ordinary one-row bands: they hold the page's median band height at one row,
+    # so a merged pair's band is TALL (the failing case needs a short majority).
+    for r in range(9, 15):
+        ws.cell(row=r, column=1, value=f"Plain {r}?")
+        ws.cell(row=r, column=4, value="Yes")
+    return [("tall_pairs", _save(wb, root, "tallpairs"))]
+
+
 def _fx_side_by_side(root: Path):
     wb = Workbook()
     ws = wb.active
@@ -194,6 +217,7 @@ _FIXTURE_BUILDERS = (
     _fx_stacked_label,
     _fx_grid,
     _fx_gutter,
+    _fx_tall_labelled_answers,
     _fx_banner,
     _fx_stacked_multi,
     _fx_empty_and_one_cell,
@@ -354,6 +378,25 @@ def test_merged_tall_label_top_row_no_fusion(built):
         # does NOT fuse rows 1 and 2.
         assert control_rows == [0, 1, 2], name
         assert len(set(control_rows)) == 3, name
+
+
+def test_stacked_tall_pairs_do_not_fuse_into_one_row(built):
+    """Each merged label shares a row with its own answer, and the three pairs
+    take three distinct rows (they used to collapse into the header's row)."""
+    _by_id, _layout, lattice = built["fixtures"]["tall_pairs"]
+    pairs = [
+        (
+            lattice.row_of_element(f"TallPairs!{2 + 2 * i}:1"),
+            lattice.row_of_element(f"TallPairs!{2 + 2 * i}:4"),
+        )
+        for i in range(3)
+    ]
+    assert all(label == answer for label, answer in pairs), pairs
+    rows = [label for label, _answer in pairs]
+    assert len(set(rows)) == 3, rows
+    header = lattice.row_of_element("TallPairs!1:1")
+    closing = lattice.row_of_element("TallPairs!8:1")
+    assert header < min(rows) and max(rows) < closing, (header, rows, closing)
 
 
 def test_two_side_by_side_share_a_row(built):
