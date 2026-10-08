@@ -4,7 +4,17 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
-## Unreleased
+## 0.6.0rc1 (2026-10-08)
+
+**Release candidate, for testing on real forms.** Two things to know before you run it on your data:
+the one-option kind rule (`PipelineConfig.kind_rule`, see Added) is **on by default** and re-derives
+a lone one-option `single_select` as `text` or `bool`, so default-config results differ from 0.5.0
+(`PIPELINE_VERSION` is `"5"`, so cached 0.5.x instances are not served); set `kind_rule=False` to
+keep the model's kind as stated. It was validated on a synthetic dev gold set only, not yet on a held-out
+set or on real forms, which is what this release is for. The lines output contract and the
+`fix2`/`fix2_style` prompt variants stay opt-in (`output_contract` defaults to `json`).
+Prompts send cell text to whichever LLM provider you configure; do not point it at data you may not
+send there.
 
 ### Added
 
