@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
+from openpyxl.styles import Color, PatternFill
 
 REPO = Path(__file__).resolve().parents[1]
 for _root in (REPO, REPO / "tools"):
@@ -52,11 +53,13 @@ from formextract.pipeline import (  # noqa: E402
 from formextract.resolve import (  # noqa: E402
     LINES_PROMPT_VARIANTS,
     LINES_VARIANT_ROW_TAGS,
+    LINES_VARIANT_STYLE_TAGS,
     PROMPT_VERSION,
     LLMResponse,
     ProjectionChunk,
     build_lines_prompt,
     lines_variant_row_tags,
+    lines_variant_style_tags,
     project_lines_chunks,
 )
 from formextract.store import Store  # noqa: E402
@@ -73,8 +76,18 @@ CHUNK = ProjectionChunk(key="Tiny", text="0: 0=Alpha widget variant? | 1=X | 2=R
 BASE_PROMPT_CHARS = 1768
 BASE_PROMPT_SHA256 = "5231a25717efe07cd64296ad66fdec556ebb0922efa3c92f6a60c8190e5cb42b"
 
+#: ``sha256`` of the other shipped variants' prompts on ``CHUNK``, also frozen
+#: from HEAD c5324e4. The style tag is a new variant, so only the four shipped
+#: ones are pinned here: ``fix2_notags`` shares ``fix2``'s text byte for byte.
+FIX1_PROMPT_SHA256 = "339bb3c0346da1ae3dd434809d5b72de81ce9c9260fc587d5f78397d8fefcd48"
+FIX2_PROMPT_SHA256 = "050e09d1300cd945a9a31b4c400792a35b2c57e662041556467b3e4077588878"
+
+#: ``sha256`` of the new ``fix2_style`` prompt on ``CHUNK`` (2705 chars): pinned
+#: so a later prose edit is a visible change, not a silent re-baseline.
+FIX2_STYLE_PROMPT_SHA256 = "ff188443e421c403d13470b81b499edd0f7e06a0393ed27cc6f7ff27845919e5"
+
 #: The largest prompt a variant may be, relative to ``base``.
-MAX_PROMPT_CHAR_RATIO = 1.45
+MAX_PROMPT_CHAR_RATIO = 1.60
 
 #: Two canned runs on the tiny workbook below, one record dump each, sha256 of
 #: the canonical dump (``_canonical_record_sha``): the json contract and the
@@ -322,7 +335,7 @@ def test_the_base_variant_is_byte_identical_to_build_lines_prompt():
 
 
 def test_every_variant_is_deterministic_and_within_the_size_bound():
-    """Every variant is a pure function of the chunk, and short: base +45%."""
+    """Every variant is a pure function of the chunk, and short: base +60%."""
     base = _prompt("base")
     for name in LINES_PROMPT_VARIANTS:
         first, second = _prompt(name), _prompt(name)
@@ -334,25 +347,37 @@ def test_every_variant_is_deterministic_and_within_the_size_bound():
         print(f"{name}: {chars} chars vs base {len(base)} (ratio {ratio:.4f})")
         _assert_within_bound(name)
     # base is unchanged, fix1 retargets the wording, fix2 adds worked examples,
-    # and fix2_notags is fix2's own text over a different projection.
+    # fix2_notags is fix2's own text over a different projection, and fix2_style
+    # is fix2's text plus the one style sentence (its own projection too).
     assert _prompt("fix1") != base
     assert _prompt("fix2") != _prompt("fix1")
     assert _prompt("fix2_notags") == _prompt("fix2")
+    assert _prompt("fix2_style") != _prompt("fix2")
+    assert len(_prompt("fix2_style")) > len(_prompt("fix2"))
 
 
 def test_the_registry_is_the_closed_vocabulary_the_config_accepts():
-    """One vocabulary: the registry, the config's tuple and the tag option."""
-    assert tuple(LINES_PROMPT_VARIANTS) == ("base", "fix1", "fix2", "fix2_notags")
+    """One vocabulary: the registry, the config's tuple and the tag options."""
+    assert tuple(LINES_PROMPT_VARIANTS) == (
+        "base", "fix1", "fix2", "fix2_notags", "fix2_style",
+    )
     assert PROMPT_VARIANTS == tuple(LINES_PROMPT_VARIANTS)
-    # no variant can be added to one mapping without the other (the tag option)
+    # no variant can be added to one mapping without the others (the options)
     assert set(LINES_VARIANT_ROW_TAGS) == set(LINES_PROMPT_VARIANTS)
+    assert set(LINES_VARIANT_STYLE_TAGS) == set(LINES_PROMPT_VARIANTS)
     assert LINES_VARIANT_ROW_TAGS == {
-        "base": True, "fix1": True, "fix2": True, "fix2_notags": False,
+        "base": True, "fix1": True, "fix2": True,
+        "fix2_notags": False, "fix2_style": True,
+    }
+    assert LINES_VARIANT_STYLE_TAGS == {
+        "base": False, "fix1": False, "fix2": False,
+        "fix2_notags": False, "fix2_style": True,
     }
     for name in LINES_PROMPT_VARIANTS:
         assert callable(LINES_PROMPT_VARIANTS[name]), name
         assert isinstance(LINES_PROMPT_VARIANTS[name](CHUNK), str), name
         assert lines_variant_row_tags(name) is LINES_VARIANT_ROW_TAGS[name], name
+        assert lines_variant_style_tags(name) is LINES_VARIANT_STYLE_TAGS[name], name
         validate_prompt_variant(name)
 
 
@@ -427,7 +452,7 @@ def test_no_variant_example_is_a_gold_canned_line(canned_lines):
 
 def test_no_variant_text_can_be_copied_into_a_field():
     """The fix variants carry no quoted literal at all (the F2 contamination)."""
-    for name in ("fix1", "fix2", "fix2_notags"):
+    for name in ("fix1", "fix2", "fix2_notags", "fix2_style"):
         assert QUOTED.findall(_prompt(name)) == [], name
         assert '"' not in _prompt(name), name
     assert QUOTED.findall(_prompt("base"))
@@ -442,7 +467,7 @@ def test_no_variant_text_can_be_copied_into_a_field():
 def test_fix1_drops_the_contaminating_literal():
     """``base`` spells out ``"Yes No"`` and fix1 does not: F2's cause is gone."""
     assert '"Yes No"' in _prompt("base")
-    for name in ("fix1", "fix2", "fix2_notags"):
+    for name in ("fix1", "fix2", "fix2_notags", "fix2_style"):
         assert '"Yes No"' not in _prompt(name), name
         # the rule survives, without a concrete string to copy
         assert "A quoted literal" in _prompt(name), name
@@ -488,9 +513,10 @@ def _run_variant(bridge, texts: dict[str, str], store_dir: Path, variant: str) -
 def test_perfect_canned_lines_reach_strict_one_under_every_variant(gold, tmp_path_factory):
     """The variant plumbing changes no parse and no resolution.
 
-    The canned client ignores the prompt, so if a variant (or the tag-free
-    projection) changed a row id, the gold's own perfect lines would stop
-    resolving. They do not: strict 1.0 on all 244 dev fields under all four.
+    The canned client ignores the prompt, so if a variant (or the tag-free or
+    style-tagged projection) changed a row id, the gold's own perfect lines
+    would stop resolving. They do not: strict 1.0 on all 244 dev fields under
+    all five.
     """
     dev, bridge = gold["dev"], gold["dev_lines"]
     texts = bridge.perfect()
@@ -531,6 +557,192 @@ def test_the_json_contract_and_the_lines_base_path_are_byte_identical_to_head(tm
     assert hashes["json"] == JSON_RECORD_SHA256
     assert hashes["lines"] == LINES_RECORD_SHA256
     assert hashes["json-fix1"] == JSON_RECORD_SHA256
+
+
+# --------------------------------------------------------------------------
+# The style cue (L1b): the ``fix2_style`` variant and its projection option.
+# --------------------------------------------------------------------------
+
+#: The one line ``fix2_style`` inserts into ``fix2``: the ``[shaded]`` definition.
+STYLE_SENTENCE = (
+    "Cells printed with a trailing `[shaded]` tag carry a fill colour: options "
+    "and checkbox cells are often shaded, typed answers often are not; it is "
+    "evidence, not a rule."
+)
+
+
+def _solid(rgb: str) -> PatternFill:
+    return PatternFill(fill_type="solid", start_color=rgb, end_color=rgb)
+
+
+def _strip_shaded(text: str) -> str:
+    """The style-tagged projection with every ``[shaded]`` suffix removed."""
+    return text.replace(" [shaded]", "")
+
+
+def _style_workbook(path: Path) -> Path:
+    """One field row with every fill boundary the style projection cares about.
+
+    ``B1`` is a plain (unfilled) option, ``C1`` a solid-filled option, ``D1`` a
+    theme fill that ``_argb_to_int`` maps to ``None``, ``E1`` a filled cell the
+    caller declares a non-answer, and ``G1:H1`` a merged filled cell.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Tiny"
+    ws["A1"] = "Alpha widget variant?"
+    ws["B1"] = "Ruby"
+    ws["C1"] = "Teal"
+    ws["C1"].fill = _solid("FFEEDD")
+    ws["D1"] = "Olive"
+    ws["D1"].fill = PatternFill(fill_type="solid", fgColor=Color(theme=6))
+    ws["E1"] = "note here"
+    ws["E1"].fill = _solid("FF00FF00")
+    ws.merge_cells("G1:H1")
+    ws["G1"] = "Merged"
+    ws["G1"].fill = _solid("FFABCDEF")
+    wb.save(path)
+    wb.close()
+    return path
+
+
+def test_the_shipped_variant_prompts_do_not_move():
+    """The four shipped prompts are HEAD's bytes; ``fix2_style`` is a pinned new one."""
+    for name, digest in (
+        ("base", BASE_PROMPT_SHA256),
+        ("fix1", FIX1_PROMPT_SHA256),
+        ("fix2", FIX2_PROMPT_SHA256),
+        ("fix2_notags", FIX2_PROMPT_SHA256),
+        ("fix2_style", FIX2_STYLE_PROMPT_SHA256),
+    ):
+        text = _prompt(name)
+        assert hashlib.sha256(text.encode("utf-8")).hexdigest() == digest, name
+
+
+def test_fix2_style_is_fix2_plus_the_style_sentence():
+    """``fix2_style`` inserts exactly one line into ``fix2``: no other prose moves."""
+    fix2 = _prompt("fix2").splitlines()
+    style = _prompt("fix2_style").splitlines()
+    assert [line for line in style if line not in fix2] == [STYLE_SENTENCE]
+    assert [line for line in fix2 if line not in style] == []
+    at = style.index(STYLE_SENTENCE)
+    assert style[:at] + style[at + 1:] == fix2
+    # the sentence is prose: no copyable literal, and the only mention of the tag
+    assert '"' not in STYLE_SENTENCE
+    assert "[shaded]" in STYLE_SENTENCE
+    assert _prompt("fix2_style").count("[shaded]") == 1
+    assert _prompt("fix2").count("[shaded]") == 0
+    assert _prompt("fix2_style").isascii()
+
+
+def test_the_style_option_is_off_on_every_shipped_path(gold):
+    """``style_tags=False`` prints today's lines, byte for byte, on both gold sets.
+
+    The style cue ships only with ``fix2_style``; every other path must project
+    the lines it did before the field existed, and no shipped line carries the
+    ``[shaded]`` suffix.
+    """
+    tabs = 0
+    for key in ("dev", "held"):
+        for tab in gold[key]["tabs"]:
+            ing = ingest(gold[f"{key}_dir"] / f"{tab}.xlsx")
+            layout = analyze(ing.elements)
+            default = project_lines_chunks(layout, ing.elements, [tab])[0].text
+            off = project_lines_chunks(
+                layout, ing.elements, [tab], style_tags=False
+            )[0].text
+            assert off == default, (key, tab)
+            assert "[shaded]" not in off, (key, tab)
+            tabs += 1
+    assert tabs == len(gold["dev"]["tabs"]) + len(gold["held"]["tabs"]) > 10
+
+
+def test_the_style_option_only_adds_the_suffix_on_every_shape(tmp_path):
+    """On the fixtures too: the option adds `` [shaded]`` and moves nothing else."""
+    for name, build in (
+        ("tiny", _tiny_workbook),
+        ("grid", _grid_workbook),
+        ("style", _style_workbook),
+    ):
+        path = build(tmp_path / f"{name}.xlsx")
+        ing = ingest(path)
+        layout = analyze(ing.elements)
+        off = project_lines_chunks(layout, ing.elements, ["Tiny"])[0].text
+        on = project_lines_chunks(layout, ing.elements, ["Tiny"], style_tags=True)[0].text
+        assert "[shaded]" not in off, name
+        assert _strip_shaded(on) == off, name
+        assert ROW_ID.findall(on) == ROW_ID.findall(off), name
+
+
+def test_the_style_tag_marks_filled_cells_only(tmp_path):
+    """The ingest boundary and the suffix: 0/None are unshaded, a real fill is not."""
+    path = _style_workbook(tmp_path / "style.xlsx")
+    ing = ingest(path)
+    fills = {e.element_id: e.fill for e in ing.elements}
+    assert fills["Tiny!1:2"] == 0            # unfilled cell -> 0
+    assert fills["Tiny!1:3"] == 0xFFEEDD     # solid fill -> its integer
+    assert fills["Tiny!1:4"] is None         # theme colour -> None
+    assert fills["Tiny!1:5"] == 0x00FF00
+    assert fills["Tiny!1:7"] == 0xABCDEF     # merged cell keeps its fill
+
+    layout = analyze(ing.elements)
+    off = project_lines_chunks(
+        layout, ing.elements, ["Tiny"], non_answer_element_ids={"Tiny!1:5"}
+    )[0].text
+    on = project_lines_chunks(
+        layout, ing.elements, ["Tiny"], style_tags=True,
+        non_answer_element_ids={"Tiny!1:5"},
+    )[0].text
+    assert "[shaded]" not in off
+    assert "Ruby [shaded]" not in on
+    assert "Teal [shaded]" in on
+    assert "Olive [shaded]" not in on
+    assert "note here [annotation] [shaded]" in on
+    assert "Merged [shaded]" in on
+    # only the suffix moved: same row ids, same segment indices, same text
+    assert _strip_shaded(on) == off
+    assert ROW_ID.findall(on) == ROW_ID.findall(off)
+
+
+def test_the_style_variant_drives_the_projection_and_reaches_the_model(tmp_path):
+    """The variant, not the caller, turns ``[shaded]`` on for the prompt it sends."""
+    path = _style_workbook(tmp_path / "style.xlsx")
+    ing = ingest(path)
+    layout = analyze(ing.elements)
+    for variant, has_tag in (("fix2", False), ("fix2_style", True)):
+        client = _Client(LINES_RESPONSE)
+        config = PipelineConfig(
+            model="canned", output_contract="lines", prompt_variant=variant
+        )
+        Pipeline(Store(tmp_path / f"store-{variant}"), client, config).run(path)
+        sent = client.prompts[0]
+        expected = build_lines_prompt(
+            project_lines_chunks(layout, ing.elements, ["Tiny"], style_tags=has_tag)[0],
+            variant,
+        )
+        assert sent == expected, variant
+        assert (" [shaded]" in sent) is has_tag, variant
+
+
+def test_the_cache_key_separates_fix2_and_fix2_style():
+    """The two variants share a projection tag but not an instance key."""
+    fix2 = _cache_key(output_contract="lines", prompt_variant="fix2")
+    style = _cache_key(output_contract="lines", prompt_variant="fix2_style")
+    assert fix2 != style
+    assert style != CACHE_KEY_LINES
+    assert style != _cache_key(output_contract="lines", prompt_variant="fix2_notags")
+
+
+def test_live_probe_accepts_the_style_variant():
+    """``live_probe.py --prompt-variant fix2_style`` parses (the name travels)."""
+    import live_probe
+
+    assert "fix2_style" in live_probe.PROMPT_VARIANTS
+    assert "fix2_style" in live_probe.ALLOWED_STRING_VALUES
+    args = live_probe.build_parser().parse_args(
+        ["--model", "m", "--prompt-variant", "fix2_style", "x.xlsx"]
+    )
+    assert args.prompt_variant == "fix2_style"
 
 
 # --------------------------------------------------------------------------
@@ -663,9 +875,9 @@ def test_mutation_an_example_line_that_does_not_parse(monkeypatch):
     assert bad[-1][1] == "sentinel ref"
 
 
-def test_mutation_the_plus_45_percent_bound_is_load_bearing(monkeypatch):
+def test_mutation_the_plus_60_percent_bound_is_load_bearing(monkeypatch):
     """The size bound is read, and the measured variants really are over 1.0."""
-    assert MAX_PROMPT_CHAR_RATIO == 1.45
+    assert MAX_PROMPT_CHAR_RATIO == 1.60
     for name in LINES_PROMPT_VARIANTS:
         assert _char_ratio(name) > 1.0 or name == "base", name
     _assert_within_bound("fix2")

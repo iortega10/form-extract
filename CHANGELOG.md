@@ -8,6 +8,27 @@ single schema version bump per output-changing release.
 
 ### Added
 
+- **Style cue: a `fix2_style` lines variant and the `[shaded]` projection tag
+  (`formextract/resolve.py`, `formextract/pipeline.py`).** The lines projection
+  prints only cell text, so a typed answer (`Bracket outer 227`) and an option
+  (`Upper shim`) look identical; the `Element.fill` the ingest already reads
+  never reached the prompt. A projection option `style_tags` (default **off**,
+  the same kind of switch as `row_tags`) prints `k=text [shaded]` for a cell
+  whose fill is a real, non-default value, and nothing else: the row id, the
+  segment index and the `[annotation]` suffix are unchanged, so a response
+  written against one projection resolves against the other. (An unfilled cell
+  ingests as `0`, a solid `RRGGBB` fill as its integer, and a theme/indexed/auto
+  colour as `None`; only the two defaults are unshaded.) `fix2_style` is `fix2`'s
+  prompt text plus one added sentence defining the tag, and it is the only
+  variant that turns the option on; `base`, `fix1`, `fix2`, `fix2_notags` and the
+  json contract stay byte-identical, and `PROMPT_VERSION`/`PIPELINE_VERSION` do
+  not move. **Bold is not available** (`Element` has no bold flag and the element
+  schema is frozen), so the cue is fill only. **Risk:** the cue is calibrated on
+  synthetic gold where options are shaded; real forms often shade the *input*
+  cells and leave option labels plain, inverting the signal. That is why the
+  sentence says "evidence, not a rule", why the option defaults to off, and why
+  this variant must not be promoted to the default prompt on dev-gold numbers
+  alone.
 - **Row lattice: stacked merged-label pairs no longer fuse (`formextract/rows.py`).**
   A band holding a tall merged label beside its own one-row answer is tall only
   because of the merge. With no short band between such bands, every one of them

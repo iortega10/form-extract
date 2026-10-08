@@ -377,8 +377,30 @@ def _row_tag(row, owner, anchor_column) -> str:
     return f" [{tag}]" if tag else ""
 
 
+def _is_shaded(element: Element) -> bool:
+    """Whether an element's cell carries a real (non-default) fill colour.
+
+    ``ingest/xlsx.py`` sets ``fill=_argb_to_int(start_color)``: an unfilled cell
+    (openpyxl's default ``00000000``) yields ``0``, a solid ``RRGGBB`` fill its
+    integer, and a theme/indexed/auto colour ``None`` (``_argb_to_int`` needs a
+    6/8-char ``rgb`` string). So the default is ``0``/``None`` and any other
+    value is a fill an author chose. The style cue reads it as evidence, never a
+    rule (see the spec's risk note).
+    """
+    return element.fill is not None and element.fill != 0
+
+
 def _project_page_rows(
-    layout, by_id, lattice, page, tabs, non_answer_ids, page_tabs, *, row_tags=True
+    layout,
+    by_id,
+    lattice,
+    page,
+    tabs,
+    non_answer_ids,
+    page_tabs,
+    *,
+    row_tags=True,
+    style_tags=False,
 ):
     """One projection chunk for one page: a line per lattice row (section 3.1).
 
@@ -386,6 +408,13 @@ def _project_page_rows(
     with it off the ``[hdr]/[grid]/[prose]`` hint is simply not printed, and
     nothing else about the line changes, so a ``row.seg`` coordinate means the
     same thing under either projection.
+
+    ``style_tags`` (default off) is the same kind of projection option: with it
+    on, a segment whose element has a real fill is printed ``k=text [shaded]``.
+    Only that suffix is added -- the row id, the segment index ``k`` and the
+    ``[annotation]`` suffix are unchanged, so a response written against one
+    projection resolves against the other. A cell that is both is
+    ``[annotation] [shaded]``.
     """
     owner: dict[tuple[int, int], Region] = {}
     for region in layout.regions:
@@ -402,10 +431,12 @@ def _project_page_rows(
             element = by_id.get(element_id)
             if element is None:
                 continue
+            suffix = ""
             if element_id in non_answer_ids:
-                segments.append(f"{k}={element.text} [annotation]")
-            else:
-                segments.append(f"{k}={element.text}")
+                suffix += " [annotation]"
+            if style_tags and _is_shaded(element):
+                suffix += " [shaded]"
+            segments.append(f"{k}={element.text}{suffix}")
         if not segments:
             continue
         tag = _row_tag(row, owner, anchor_column) if row_tags else ""
@@ -430,6 +461,7 @@ def project_lines_chunks(
     non_answer_element_ids: set[str] | None = None,
     page_tabs: dict[int, str] | None = None,
     row_tags: bool = True,
+    style_tags: bool = False,
 ) -> list[ProjectionChunk]:
     """0.6.0 lines projection: one line per page-global lattice ROW.
 
@@ -445,6 +477,11 @@ def project_lines_chunks(
     than a prompt edit. Only the tag text is dropped - the row id, the segments
     and the ``[annotation]`` segment tag are the same under both projections, so
     a response written against one is valid against the other.
+
+    ``style_tags=False`` (the default) prints exactly today's lines; with it on
+    a filled cell gains a trailing ``[shaded]`` (:func:`_is_shaded`), the L1b
+    style cue's projection option. It changes no row id and no segment index,
+    so the two projections resolve a response identically.
     """
     non_answer_ids = set(non_answer_element_ids or ())
     by_id = {e.element_id: e for e in elements}
@@ -462,6 +499,7 @@ def project_lines_chunks(
             non_answer_ids,
             page_tabs,
             row_tags=row_tags,
+            style_tags=style_tags,
         )
         if chunk is not None:
             chunks.append(chunk)
@@ -542,14 +580,31 @@ _LINES_FIX2_WORKED_EXAMPLES = (
 )
 
 
-def _lines_prompt_fix_body(chunk: ProjectionChunk, worked_examples: str) -> str:
+#: The ONE sentence ``fix2_style`` adds to ``fix2``: it defines the ``[shaded]``
+#: projection tag (:func:`_is_shaded`). Deliberately no double quote and not an
+#: example line, so the prompt's disjointness checks (no copyable string, no
+#: gold word) stay satisfied; the tag is evidence, not a rule, because real forms
+#: often invert the synthetic gold's convention and this variant must not be
+#: promoted to the default prompt on dev-gold numbers alone.
+_LINES_STYLE_SENTENCE = (
+    "Cells printed with a trailing `[shaded]` tag carry a fill colour: options "
+    "and checkbox cells are often shaded, typed answers often are not; it is "
+    "evidence, not a rule.\n"
+)
+
+
+def _lines_prompt_fix_body(
+    chunk: ProjectionChunk, worked_examples: str, *, style_sentence: str = ""
+) -> str:
     """``fix1``/``fix2``: the base rules retargeted at the observed failures.
 
     The contaminating literal example is gone, so no string in the prompt can be
     copied into a field (F2); the kind is tied to the ANSWER rather than the
     label's punctuation (F6); a row is a field XOR a disposition (F3/F7); a
     two-label row is two fields (F5); marks are never cited (F8). ``fix2`` adds
-    the worked examples for the structures that scored zero.
+    the worked examples for the structures that scored zero; ``style_sentence``
+    lets a variant inject the ``[shaded]`` definition without moving ``fix1``'s
+    or ``fix2``'s bytes.
     """
     return (
         "You bind ONE form tab. The tab is drawn as numbered ROWS; every cell in "
@@ -579,7 +634,8 @@ def _lines_prompt_fix_body(chunk: ProjectionChunk, worked_examples: str) -> str:
         "- Marks (`X`, a tick) are decided by the resolver: never cite a mark "
         "cell in `L=`, `O=` or `A=`, and give `A=` only where no mark decides (a "
         "typed value, a bold or coloured option, or a `text` value cell).\n"
-        "- `N=` is a note that belongs to the field.\n"
+        + style_sentence
+        + "- `N=` is a note that belongs to the field.\n"
         "- A quoted literal may stand for one cell holding several options; it "
         "is allowed under `O=` or `N=` only.\n"
         "- A row that is not a field is `hdr L=3.0`, `note L=5.0` or "
@@ -607,6 +663,17 @@ def _lines_prompt_fix2(chunk: ProjectionChunk) -> str:
     return _lines_prompt_fix_body(chunk, _LINES_FIX2_WORKED_EXAMPLES)
 
 
+def _lines_prompt_fix2_style(chunk: ProjectionChunk) -> str:
+    """``fix2_style``: ``fix2``'s text plus one sentence defining ``[shaded]``.
+
+    Ships with the ``style_tags`` projection on (see ``LINES_VARIANT_STYLE_TAGS``),
+    so the model sees the ``[shaded]`` suffix the sentence explains.
+    """
+    return _lines_prompt_fix_body(
+        chunk, _LINES_FIX2_WORKED_EXAMPLES, style_sentence=_LINES_STYLE_SENTENCE
+    )
+
+
 #: The lines-contract prompt variants, by name. This is the closed vocabulary
 #: ``PipelineConfig.prompt_variant`` is validated against, and every value is a
 #: PURE function of the chunk it is handed: no clock, no counter, no module
@@ -619,6 +686,7 @@ LINES_PROMPT_VARIANTS: dict[str, Callable[[ProjectionChunk], str]] = {
     "fix1": _lines_prompt_fix1,
     "fix2": _lines_prompt_fix2,
     "fix2_notags": _lines_prompt_fix2,
+    "fix2_style": _lines_prompt_fix2_style,
 }
 
 #: The projection option each variant needs. ``fix2_notags`` is ``fix2``'s text
@@ -629,12 +697,29 @@ LINES_VARIANT_ROW_TAGS: dict[str, bool] = {
     "fix1": True,
     "fix2": True,
     "fix2_notags": False,
+    "fix2_style": True,
+}
+
+#: The style-tag projection option each variant needs (L1b). Only ``fix2_style``
+#: turns ``[shaded]`` on; every other variant projects exactly today's lines, so
+#: ``style_tags=False`` is the default on every shipped path.
+LINES_VARIANT_STYLE_TAGS: dict[str, bool] = {
+    "base": False,
+    "fix1": False,
+    "fix2": False,
+    "fix2_notags": False,
+    "fix2_style": True,
 }
 
 
 def lines_variant_row_tags(variant: str) -> bool:
     """Whether the projection prints ``[hdr]/[grid]/[prose]`` for ``variant``."""
     return LINES_VARIANT_ROW_TAGS[variant]
+
+
+def lines_variant_style_tags(variant: str) -> bool:
+    """Whether the projection prints ``[shaded]`` for ``variant``."""
+    return LINES_VARIANT_STYLE_TAGS[variant]
 
 
 def build_lines_prompt(chunk: ProjectionChunk, variant: str = "base") -> str:

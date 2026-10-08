@@ -474,9 +474,12 @@ python tools/live_probe.py --gold gold --provider gemini --model gemini-2.5-flas
     --contract lines --prompt-variant fix2
 ```
 
-`base` is the default and the prompt 0.6.0-L1b shipped; `fix1`, `fix2` and
-`fix2_notags` are experimental candidates written from the failures a live dev
-run exposed, and they stay experimental until the owner reads their numbers. The
+`base` is the default and the prompt 0.6.0-L1b shipped; `fix1`, `fix2`,
+`fix2_notags` and `fix2_style` are experimental candidates written from the
+failures a live dev run exposed, and they stay experimental until the owner reads
+their numbers. `fix2_notags` is `fix2`'s text over a projection with the row tags
+off, and `fix2_style` is `fix2`'s text plus one sentence defining the `[shaded]`
+projection tag, which it is the only variant to turn on (see `resolve.py`). The
 name is printed as `"prompt_variant"` in the output (the single-tab mode prints
 it too, but measures the json prompt, which has no variants) and is part of the
 run's cache key. The tuning rule: a variant is tuned on the dev gold only, a

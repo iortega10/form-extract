@@ -37,6 +37,7 @@ from .resolve import (
     drafts_resolve_cleanly,
     drafts_to_fields,
     lines_variant_row_tags,
+    lines_variant_style_tags,
     project_chunks,
     project_lines_chunks,
     remap_drafts_for_page,
@@ -397,11 +398,12 @@ class PipelineConfig:
     the row-indexed line grammar (no repair call; see ``resolve``). It is
     appended to the cache key whenever it is not ``"json"``. ``prompt_variant``
     (default ``"base"``, one of ``PROMPT_VARIANTS``) selects the lines contract's
-    prompt and, for ``"fix2_notags"``, its projection (the row tags off):
-    ``"base"`` is the 0.6.0-L1b prompt byte for byte and the other names are
+    prompt and its projection options that depend on it: for ``"fix2_notags"``
+    the row tags are off, and for ``"fix2_style"`` the ``[shaded]`` style tag is
+    on. ``"base"`` is the 0.6.0-L1b prompt byte for byte and the other names are
     experiments measured with ``live_probe.py --gold --prompt-variant``. The json
     contract ignores the field; it is appended to the cache key whenever it is
-    not ``"base"``.
+    not ``"base"`` (so the projection options it carries ride along with it).
     """
 
     model: str = "gpt-4o-mini"
@@ -667,6 +669,7 @@ class Pipeline:
                         non_answer_element_ids=non_answer_ids,
                         page_tabs=page_tabs,
                         row_tags=lines_variant_row_tags(self.config.prompt_variant),
+                        style_tags=lines_variant_style_tags(self.config.prompt_variant),
                     )
                 else:
                     chunks = project_chunks(
