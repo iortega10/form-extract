@@ -330,11 +330,14 @@ class Disposition:
 
     Recorded only (section 5.1). L2a consumes these to score coverage; L1b only
     returns them so a run can report the units a response dispositioned.
+    ``page`` is the projection chunk's page (0.6.1-C), so a caller can group the
+    rows by tab; ``None`` when the chunk did not name one.
     """
 
     kind: LineKind
     rows: tuple[int, ...]
     line_no: int
+    page: int | None = None
 
 
 def _anchor_column(layout: LayoutResult) -> int | None:
@@ -805,6 +808,31 @@ def _record_rows(lattice, record) -> tuple[int, ...]:
     return tuple(sorted(rows))
 
 
+def _sole_row_text_cell(
+    lattice, label_refs, elements_by_id
+) -> tuple[int, int, str] | None:
+    """The one non-mark text cell of the label refs' lattice row(s), or ``None``.
+
+    0.6.1-B: a label whose cited ``L=`` cells are all marks (or empty) leaves the
+    field with no text at all. When the cited row(s) hold exactly one cell whose
+    ``strip_marks`` text is non-empty, that cell is the label the model was
+    pointing at; the caller promotes it (and drops its other citation). Two or
+    more text cells - or none - is genuinely ambiguous: the caller leaves the
+    label empty and review-flags the field.
+    """
+    if lattice is None:
+        return None
+    candidates: list[tuple[int, int, str]] = []
+    for row_index in sorted({ref.row for ref in label_refs if not ref.is_sentinel}):
+        if row_index < 0 or row_index >= len(lattice.rows):
+            continue
+        row = lattice.rows[row_index]
+        for seg, element_id in enumerate(row.elements):
+            if strip_marks(_element_text(elements_by_id, element_id)):
+                candidates.append((row_index, seg, element_id))
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _draft_from_record(
     record, lattice, layout, elements_by_id, non_answer_ids, now
 ) -> BindingDraft:
@@ -823,6 +851,31 @@ def _draft_from_record(
             label_parts.append(text)
     label = " ".join(label_parts)
 
+    # 0.6.1-B: never emit a field with an empty label silently. The cited ``L=``
+    # cells were all marks (or empty); repair the label from the row's sole
+    # non-mark text cell when there is exactly one, and review-flag the field
+    # either way (a repaired label and a still-empty one are both suspect).
+    review = record.review
+    promoted_element_id: str | None = None
+    if not label:
+        review = True
+        candidate = _sole_row_text_cell(lattice, label_refs, elements_by_id)
+        if candidate is not None:
+            row_index, seg, promoted_element_id = candidate
+            label = strip_marks(_element_text(elements_by_id, promoted_element_id))
+            promoted_ref = SegmentRef(row_index, seg)
+            label_refs = sorted(
+                [*label_refs, promoted_ref],
+                key=lambda ref: (ref.is_sentinel, ref.row, ref.seg),
+            )
+            l_ids.append(promoted_element_id)
+
+    def _promoted(ref) -> bool:
+        return (
+            promoted_element_id is not None
+            and _ref_element_id(lattice, ref) == promoted_element_id
+        )
+
     options: list[Option] = []
     option_of_element: dict[str, Option] = {}
     #: 0.6.0-K1: the ``O`` refs of the option cells, so the kind rule can turn a
@@ -839,7 +892,7 @@ def _draft_from_record(
             for element_id in (
                 _ref_element_id(lattice, ref) for ref in item_refs(item)
             )
-            if element_id is not None
+            if element_id is not None and element_id != promoted_element_id
         ]
         cited_ids.update(element_ids)
         if isinstance(item, JoinItem):
@@ -852,7 +905,9 @@ def _draft_from_record(
                 option = Option(text=joined)
                 options.append(option)
                 option_refs.extend(
-                    _ref_to_element_ref(lattice, ref) for ref in item_refs(item)
+                    _ref_to_element_ref(lattice, ref)
+                    for ref in item_refs(item)
+                    if not _promoted(ref)
                 )
                 for element_id in element_ids:
                     option_of_element[element_id] = option
@@ -867,7 +922,9 @@ def _draft_from_record(
             options.append(option)
             option_of_element[element_id] = option
         option_refs.extend(
-            _ref_to_element_ref(lattice, ref) for ref in item_refs(item)
+            _ref_to_element_ref(lattice, ref)
+            for ref in item_refs(item)
+            if not _promoted(ref)
         )
 
     annotations: list[str] = []
@@ -877,11 +934,13 @@ def _draft_from_record(
             continue
         for ref in item_refs(item):
             element_id = _ref_element_id(lattice, ref)
-            if element_id is None:
+            if element_id is None or element_id == promoted_element_id:
                 continue
             annotations.append(_element_text(elements_by_id, element_id))
 
-    answer_items = _ordered_refs(record.answer)
+    answer_items = [
+        ref for ref in _ordered_refs(record.answer) if not _promoted(ref)
+    ]
     answer_element_ids: list[str] = []
     for ref in answer_items:
         element_id = _ref_element_id(lattice, ref)
@@ -926,6 +985,8 @@ def _draft_from_record(
     for group in (record.options, record.answer, record.notes):
         for item in group:
             for ref in item_refs(item):
+                if _promoted(ref):
+                    continue
                 source_refs.append(_ref_to_element_ref(lattice, ref))
 
     if layout is not None:
@@ -948,7 +1009,7 @@ def _draft_from_record(
         answer_refs=answer_refs,
         option_refs=tuple(option_refs),
         confidence=None,
-        review_reason=ReviewReason.AMBIGUOUS_ROLE if record.review else None,
+        review_reason=ReviewReason.AMBIGUOUS_ROLE if review else None,
         provenance=BindingProvenance(
             authored_by=AuthoredBy.LLM,
             authored_at=now,
@@ -1148,6 +1209,7 @@ def parse_lines_response(
                     kind=record.kind,
                     rows=_record_rows(lattice, record),
                     line_no=record.line_no,
+                    page=chunk.page,
                 )
             )
             continue
@@ -2277,6 +2339,13 @@ def drafts_to_fields(
                 decision = _apply_declared_convention(
                     decision, draft, tab, elements_by_id, checkbox_conventions
                 )
+            if decision is not None and draft.control_type is ControlType.TEXT:
+                # 0.6.1-D: a TEXT field has no options to select, so a mark cell
+                # in its row (or a marker injected from the row) is inert for it.
+                # Cleared before any decision branch: an undecided mark would
+                # otherwise null the typed answer and set an ambiguity on a text
+                # field whose answer bound fine. SELECT/MULTI/BOOL are untouched.
+                decision = None
 
             if decision is not None and decision.kind in ("auto_select", "declared_convention"):
                 option_texts = decision.option_texts or (
@@ -2342,6 +2411,17 @@ def drafts_to_fields(
                 options = list(draft.options)
 
             selected = [o.text for o in options if o.selected]
+            if decision is not None and decision.kind in (
+                "auto_select",
+                "declared_convention",
+            ):
+                # 0.6.1-A: the resolver's own mark decision selected the options,
+                # so ``answers`` mirrors that selection in option order. The
+                # model's original claim, when it made one and it differed, is
+                # kept on the field's provenance below.
+                answers = list(selected)
+            else:
+                answers = list(draft.answers)
             if decision is not None and decision.kind in ("ambiguous", "declining"):
                 value_raw = None
             elif draft.control_type is ControlType.TEXT:
@@ -2362,6 +2442,10 @@ def drafts_to_fields(
                 binding_id=draft.draft_id,
                 llm_confidence=draft.confidence,
             )
+            if answers != list(draft.answers) and draft.answers:
+                # 0.6.1-A: the model's own answer claim differed from the
+                # resolver's selection; keep the original on the provenance.
+                provenance.model_answers = list(draft.answers)
             if draft.kind_rule is not None:
                 # 0.6.0-K1: the rule re-derived this field; keep the model's
                 # stated kind beside the rule id. Written only when it fired.
@@ -2421,7 +2505,7 @@ def drafts_to_fields(
                     control_type=draft.control_type,
                     bbox=draft.bbox,
                     options=options,
-                    answers=draft.answers,
+                    answers=answers,
                     annotations=draft.annotations,
                     region_ref=draft.region_id,
                     canonical_name=canonical,

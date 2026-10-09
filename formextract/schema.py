@@ -8,6 +8,10 @@ from typing import Callable
 
 from .model import ControlType, Option
 
+# 0.6.1 keeps this at "2": `TabCoverage` gains `dispositions` and
+# `model_declined`, but both are `omit_if_default`, so a json record (which has
+# no dispositions) serialises byte-identical to 0.6.0 and the record shape does
+# not move. See docs/design/0.6.1-note.md (Part C).
 SCHEMA_VERSION = "2"
 
 _WS_RE = re.compile(r"\s+")

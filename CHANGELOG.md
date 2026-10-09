@@ -4,6 +4,64 @@ All notable changes to this project are documented in this file. The project
 follows a plain release-numbering scheme (`0.1.0`, `0.2.0`, ...) and keeps a
 single schema version bump per output-changing release.
 
+## 0.6.1 (unreleased)
+
+**Read before you run it.** `PIPELINE_VERSION` is `"6"` (`SCHEMA_VERSION` stays
+`"2"`), so cached 0.6.0 instances are not served (the call cache keys on prompt
+text, which does not change, so cached calls still are). Three output changes:
+(A) a field whose mark the resolver decided now carries that decision on
+`answers` as well as `options[].selected`, and the model's own differing claim
+is kept on `provenance.model_answers`; (B) under the `lines` contract a label
+built from mark-only cells is no longer emitted silently empty — it is repaired
+from the row's sole non-mark text cell when there is exactly one, and
+review-flagged either way; (D) a stray mark cell in a `text` field's row no
+longer nulls the typed value or invents an ambiguity. `PROMPT_VERSION` (`"4"`)
+and `KIND_RULE_VERSION` (`"2"`) do not move: no prompt changed. The full
+reasoning, tables and the constants checked are in `docs/design/0.6.1-note.md`.
+
+### Changed
+
+- **A — `answers` agrees with the resolver's selection.** When a mark decision
+  (`auto_select`, or a caller's `checkbox_conventions`) selects options,
+  `Field.answers` becomes exactly the selected options' texts in option order,
+  instead of the model's claim (`resolve.py`, `drafts_to_fields`). The model's
+  own `answers`, when it gave a different one, are kept on the new
+  `Provenance.model_answers` (emitted only while set). A field the resolver
+  made no decision on (`ambiguous`/`declining`) is unchanged: the model's
+  answers stand. This closes the defect where `answers` contradicted
+  `options[].selected` on the `json` contract.
+- **B — no silent empty label (`lines`).** A field whose cited `L=` cells are
+  all marks (or empty) is no longer emitted with an empty label unnoticed. When
+  the cited lattice row has exactly one non-mark text cell, that cell becomes
+  the label (and is dropped as an option/answer/note); otherwise the label stays
+  empty. Either way the field is review-flagged (`AMBIGUOUS_ROLE`). The
+  `text L=<mark> A=<text>` case is covered: the cell becomes the label and is no
+  longer the answer.
+- **C — a per-tab outcome in coverage.** `TabCoverage` gains `dispositions`
+  (the lattice rows a tab's `hdr`/`note`/`skip` records addressed) and
+  `model_declined` (`True` when a tab has anchors, the model returned at least
+  one disposition and no field; `None` under `json`), so "the model declared the
+  tab non-form" is distinguishable from "anchors present but unbound". It
+  changes no `InstanceStatus`, no `min_coverage` semantics and adds no error.
+  Both members are `omit_if_default`, so a `json` record serialises
+  byte-identical to 0.6.0 and `SCHEMA_VERSION` stays `"2"`.
+- **D — a stray mark does not null a `text` answer.** For a field of
+  `control_type` `text`, a mark cell in its row (or a marker injected from the
+  row) is inert: it no longer nulls `value_raw`/`value_normalized` (they follow
+  `answers`, as on a markless row) and no longer sets an ambiguity. The guard is
+  scoped to `text`; `single_select`/`multi_select`/`bool` decisions are
+  unchanged (a mark there is the control's own state). This closes the
+  integrator's "value=None beside a checkbox".
+
+### Added
+
+- **A `json` vs `lines` section in the README**, with who decides a checkbox
+  mark, what `answers` and `options[].selected` mean in each contract, the speed
+  note, and a "strict tabs" paragraph on `min_coverage=0.01`.
+- **`PROMPT_VARIANTS` is exported from the package root** (`formextract.PROMPT_VARIANTS`),
+  named in the `PipelineConfig` docstring; the `[project.urls]` table gains a
+  `Changelog` link.
+
 ## 0.6.0 (2026-10-08)
 
 (Release-candidate history: `0.6.0rc1` was tagged but its release run failed CI before any upload, so

@@ -26,7 +26,13 @@ from typing import Any, TypeVar, Union, get_args, get_origin, get_type_hints
 # default-config run's fields change and cached 0.6.0-L1b instances must not be
 # served. The call cache keys on prompt text, which does not change, so cached
 # calls are still served.
-PIPELINE_VERSION = "5"
+# 0.6.1 moves this to "6": a resolver mark decision now also makes a field's
+# `answers` agree with its `options[].selected` (A), and a lines label built from
+# a mark-only cell is repaired from the row's sole text cell and review-flagged
+# rather than emitted silently empty (B). Both change default output, so cached
+# 0.6.0 instances must not be served. The call cache keys on prompt text, which
+# does not change, so cached calls are still served.
+PIPELINE_VERSION = "6"
 
 #: 0.6.0-K1: the id of the `one_option_single` kind rule, recorded on a
 #: `Provenance` the rule re-derived and used as the cache-key token when the
@@ -270,6 +276,12 @@ class Provenance:
     #: 0.6.0-K1: the id of the rule that re-derived the field
     #: (``one_option_single``); emitted only while set.
     kind_rule: str | None = field(default=None, metadata={"omit_if_default": True})
+    #: 0.6.1-A: the model's own ``answers`` for a field whose mark decision the
+    #: resolver overrode. Emitted only while set (``omit_if_default``), so an
+    #: unaffected record's bytes are unchanged.
+    model_answers: list[str] | None = field(
+        default=None, metadata={"omit_if_default": True}
+    )
 
 
 @dataclass
@@ -489,6 +501,20 @@ class TabCoverage:
     max_anchors_per_tab: int = 0
     unbound: list[UnboundUnit] = field(default_factory=list)
     unbound_truncated: bool = False
+    #: 0.6.1-C: the number of lattice rows on this tab the model dispositioned as
+    #: non-fields (its ``hdr``/``note``/``skip`` records; distinct rows). ``0``
+    #: under the json contract, which has no dispositions. ``omit_if_default`` so
+    #: a json record's bytes are unchanged from 0.6.0 and ``SCHEMA_VERSION`` stays
+    #: ``"2"``.
+    dispositions: int = field(default=0, metadata={"omit_if_default": True})
+    #: 0.6.1-C: True when the tab has anchors, the model returned at least one
+    #: disposition and no field: "the model labelled every row non-field" is
+    #: distinguishable from "anchors present but unbound" (which leaves this
+    #: False and shows in ``unbound``). ``None`` under the json contract (the
+    #: information does not exist there). ``omit_if_default`` for the same reason
+    #: as ``dispositions``. Does not change ``InstanceStatus`` or
+    #: ``min_coverage``.
+    model_declined: bool | None = field(default=None, metadata={"omit_if_default": True})
 
 
 @dataclass

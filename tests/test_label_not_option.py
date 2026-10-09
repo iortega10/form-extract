@@ -239,7 +239,10 @@ def test_pipeline_version_is_in_the_cache_key(tmp_path):
     assert SCHEMA_VERSION == "2"
     assert PROMPT_VERSION == "4"
     # 0.6.0-K1: the one-option kind rule changes a default run's fields.
-    assert PIPELINE_VERSION == "5"
+    # 0.6.1: A/B/D change a default run's output; C's coverage members are
+    # omit_if_default, so the record shape does not move and SCHEMA_VERSION
+    # stays "2".
+    assert PIPELINE_VERSION == "6"
 
     base = dict(
         content_hash="abc123",

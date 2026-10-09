@@ -403,7 +403,8 @@ class PipelineConfig:
     keeps the prompt and projection byte-identical to 0.5.0, ``"lines"`` uses
     the row-indexed line grammar (no repair call; see ``resolve``). It is
     appended to the cache key whenever it is not ``"json"``. ``prompt_variant``
-    (default ``"base"``, one of ``PROMPT_VARIANTS``) selects the lines contract's
+    (default ``"base"``, one of ``formextract.pipeline.PROMPT_VARIANTS``, also
+    re-exported as ``formextract.PROMPT_VARIANTS``) selects the lines contract's
     prompt and its projection options that depend on it: for ``"fix2_notags"``
     the row tags are off, and for ``"fix2_style"`` the ``[shaded]`` style tag is
     on. ``"base"`` is the 0.6.0-L1b prompt byte for byte and the other names are
@@ -451,7 +452,9 @@ class Pipeline:
             self.config.checkbox_conventions
         )
 
-    def _author_with_reuse(self, chunks, layout, elements, *, force: bool = False):
+    def _author_with_reuse(
+        self, chunks, layout, elements, *, force: bool = False, dispositions_out=None
+    ):
         """Author each tab once and replay geometrically identical tabs.
 
         Per workbook and in memory only: the exemplar map lives for the duration
@@ -487,7 +490,8 @@ class Pipeline:
 
         def author_one(pair):
             idx, chunk = pair
-            return author_drafts(
+            chunk_dispositions: list = []
+            result = author_drafts(
                 [chunk],
                 self.llm_client,
                 model=self.config.model,
@@ -503,7 +507,9 @@ class Pipeline:
                 elements_by_id=elements_by_id,
                 non_answer_element_ids=non_answer_ids,
                 kind_rule=self.config.kind_rule,
+                dispositions_out=chunk_dispositions,
             )
+            return (*result, chunk_dispositions)
 
         def author_many(indices):
             pairs = [(idx, chunks[idx]) for idx in indices]
@@ -515,7 +521,7 @@ class Pipeline:
         # Phase B: author the exemplars (concurrently when configured).
         exemplar_results = author_many(exemplar_indices)
         exemplar_drafts_by_key: dict[tuple[str, tuple[str, ...]], tuple[int, list]] = {}
-        for exemplar_idx, (fresh_drafts, _fresh_calls, _fresh_errors) in zip(
+        for exemplar_idx, (fresh_drafts, _fresh_calls, _fresh_errors, _fresh_disps) in zip(
             exemplar_indices, exemplar_results
         ):
             if fresh_drafts:
@@ -528,7 +534,9 @@ class Pipeline:
         # the fall-through chunks that still need a fresh authoring call. Results
         # are assembled below in chunk order, so a fallback before a later
         # exemplar still lands in the same position as the serial path.
-        results_by_index: dict[int, tuple[list, list[LLMCall], list[ResolutionError]]] = {}
+        results_by_index: dict[
+            int, tuple[list, list[LLMCall], list[ResolutionError], list]
+        ] = {}
         for pos, exemplar_idx in enumerate(exemplar_indices):
             results_by_index[exemplar_idx] = exemplar_results[pos]
 
@@ -558,7 +566,7 @@ class Pipeline:
                         self.config,
                     )
                     replayed_draft_ids.update(d.draft_id for d in remapped)
-                    results_by_index[idx] = (remapped, [], [])
+                    results_by_index[idx] = (remapped, [], [], [])
                     continue
                 # Reuse miss: fall through to a fresh call for this tab.
             fallback_indices.append(idx)
@@ -572,9 +580,11 @@ class Pipeline:
         calls: list[LLMCall] = []
         errors: list[ResolutionError] = []
         for idx in range(len(chunks)):
-            fresh_drafts, fresh_calls, fresh_errors = results_by_index[idx]
+            fresh_drafts, fresh_calls, fresh_errors, fresh_disps = results_by_index[idx]
             drafts.extend(fresh_drafts)
             calls.extend(fresh_calls)
+            if dispositions_out is not None:
+                dispositions_out.extend(fresh_disps)
             for err in fresh_errors:
                 errors.append(ResolutionError(str(idx), err.tab, err.reason))
         return drafts, calls, errors, replayed_draft_ids
@@ -623,6 +633,9 @@ class Pipeline:
         )
         fields = []
         calls: list[LLMCall] = []
+        #: 0.6.1-C: the lines contract's dispositions, collected for the
+        #: per-tab coverage record; ``None`` for a contract without them (json).
+        dispositions: list | None = None
 
         try:
             ing = ingest(path)
@@ -695,9 +708,12 @@ class Pipeline:
                     )
                 try:
                     if self.config.reuse_layout_bindings:
+                        if self.config.output_contract == "lines":
+                            dispositions = []
                         drafts, calls, resolve_errors, replayed_draft_ids = (
                             self._author_with_reuse(
-                                chunks, layout, elements, force=force
+                                chunks, layout, elements, force=force,
+                                dispositions_out=dispositions,
                             )
                         )
                         fields = drafts_to_fields(
@@ -711,6 +727,8 @@ class Pipeline:
                             page_tabs=page_tabs,
                         )
                     else:
+                        if self.config.output_contract == "lines":
+                            dispositions = []
                         drafts, calls, resolve_errors = author_drafts(
                             chunks,
                             self.llm_client,
@@ -728,6 +746,7 @@ class Pipeline:
                             elements_by_id=elements_by_id,
                             non_answer_element_ids=non_answer_ids,
                             kind_rule=self.config.kind_rule,
+                            dispositions_out=dispositions,
                         )
                         fields = drafts_to_fields(
                             drafts,
@@ -767,6 +786,7 @@ class Pipeline:
                 page_tabs=page_tabs,
                 tabs=tabs,
                 non_answer_element_ids=non_answer_ids,
+                dispositions=dispositions,
             )
             eligible = [c.ratio for c in coverage if c.ratio is not None]
             coverage_min_ratio = min(eligible) if eligible else None

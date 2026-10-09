@@ -270,12 +270,16 @@ def test_zero_marks_unchanged():
     assert field.provenance.review_flag is False
 
 
-# The exact ``to_json(Field)`` the pre-fix code produced for one right-only
-# stacked mark (captured on HEAD 5aeedb0). The union must leave it byte-identical.
+# The exact ``to_json(Field)`` for one right-only stacked mark (captured on HEAD
+# 5aeedb0; 0.6.1-A moves the one member it deliberately changes, ``answers``: the
+# resolver's selection now mirrors onto it). The union must leave every other
+# member byte-identical.
 SINGLE_MARK_STACKED_JSON = """{
   "ambiguity": null,
   "annotations": [],
-  "answers": [],
+  "answers": [
+    "Option A"
+  ],
   "bbox": {
     "page": 0,
     "x0": 0.0,
@@ -483,12 +487,16 @@ def test_non_answer_marker_and_candidate_are_ignored():
     assert field.provenance.review_flag is False
 
 
-# The exact pre-fix Field for a BETWEEN marker resolved by a declared
-# ``mark_precedes_option`` convention (captured on HEAD 5aeedb0).
+# The exact Field for a BETWEEN marker resolved by a declared
+# ``mark_precedes_option`` convention (captured on HEAD 5aeedb0; 0.6.1-A moves
+# the one member it deliberately changes, ``answers``: a resolver selection now
+# mirrors onto ``answers``).
 BETWEEN_CONVENTION_JSON = """{
   "ambiguity": null,
   "annotations": [],
-  "answers": [],
+  "answers": [
+    "No"
+  ],
   "bbox": {
     "page": 0,
     "x0": 0.0,

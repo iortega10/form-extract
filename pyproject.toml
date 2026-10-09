@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "form-extract"
-version = "0.6.0"
+version = "0.6.1"
 description = "Structured field extraction from non-uniform document forms"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -26,6 +26,7 @@ dependencies = [
 Homepage = "https://github.com/iortega10/form-extract"
 Source = "https://github.com/iortega10/form-extract"
 Issues = "https://github.com/iortega10/form-extract/issues"
+Changelog = "https://github.com/iortega10/form-extract/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
 pdf = ["pymupdf>=1.24"]

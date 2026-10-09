@@ -91,13 +91,21 @@ MAX_PROMPT_CHAR_RATIO = 1.60
 
 #: Two canned runs on the tiny workbook below, one record dump each, sha256 of
 #: the canonical dump (``_canonical_record_sha``): the json contract and the
-#: lines contract at ``base``. Both carry ``pipeline_version="5"`` (0.6.0-K1).
-JSON_RECORD_SHA256 = "082c6144f3dc83c0899987ee2b955559d0b02a7da1fbe47c634e2977f19dede2"
-LINES_RECORD_SHA256 = "5429b585de1815bbbca8dee2a316839742eafec1a271574a37644c8db51d342e"
+#: lines contract at ``base``. Both carry ``pipeline_version="6"`` and
+#: ``schema_version="2"`` (0.6.1). The tiny workbook's only field is an
+#: undecided BETWEEN marker, so 0.6.1-A/B/D leave its ``answers`` and label
+#: alone. The json pin moves on ``pipeline_version`` alone: 0.6.1-C's two
+#: coverage members are ``omit_if_default`` and a json run omits them, so
+#: ``SCHEMA_VERSION`` stays ``"2"``. The lines pin also carries 0.6.1-C's one
+#: lines-only member, ``model_declined`` (proved by the PRE_K1 test below).
+JSON_RECORD_SHA256 = "c4a89a1e18c0016208ad10315fce011a75c337efbe9f0137103432de436c045d"
+LINES_RECORD_SHA256 = "cc7b5e5fd06dbd6a0f160bf3fa1bbfaea060d4d444bd737913adfe1565292d39"
 
 #: The pre-K1 (0.6.0-L1b) values of the two hashes above, when the dump's
-#: ``pipeline_version`` is substituted back to ``"4"``. Kept as named historical
-#: pins: the K1 build's proof that only the version moved (A3).
+#: ``pipeline_version`` is substituted back to ``"4"`` (and, for the lines dump,
+#: 0.6.1-C's ``model_declined`` member is dropped; a json dump never carries
+#: it). Kept as named historical pins: the build's proof that only those bytes
+#: moved (A3).
 JSON_RECORD_SHA256_PRE_K1 = "e33bafd6bc3a4b1fe0f8a791dfe62bc0e1f13a6cd0a77317e1695e97a194b1a8"
 LINES_RECORD_SHA256_PRE_K1 = "06710633ecc5cb4b43620b900d80737bc59bcdf4ce41ded5807740a217f6d99c"
 
@@ -196,13 +204,18 @@ def _grid_workbook(path: Path) -> Path:
     return path
 
 
-def _canonical_record_sha(record) -> str:
-    """sha256 of a record dump with every per-run byte normalised away.
+def _canonical_sha_of(dump: dict) -> str:
+    text = json.dumps(dump, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _canonical_dump(record) -> dict:
+    """A record dump with every per-run byte normalised away.
 
     Dropped: the run's own ids and clock, the source content hash (openpyxl
     stamps the wall clock, so the same workbook written twice differs), and the
     two per-draft ids a resolver call mints. The archived calls are kept as their
-    prompt hashes, so the hash covers the prompt/projection the run sent.
+    prompt hashes, so the dump covers the prompt/projection the run sent.
     """
     dump = json.loads(to_json(record))
     for key in ("instance_id", "run_id", "created_at", "idempotency_key", "source"):
@@ -213,8 +226,12 @@ def _canonical_record_sha(record) -> str:
         if isinstance(provenance, dict):
             provenance.pop("llm_call_ref", None)
             provenance.pop("binding_id", None)
-    text = json.dumps(dump, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return dump
+
+
+def _canonical_record_sha(record) -> str:
+    """sha256 of ``_canonical_dump(record)``."""
+    return _canonical_sha_of(_canonical_dump(record))
 
 
 def _cache_key(**overrides) -> str:
@@ -534,14 +551,14 @@ def test_perfect_canned_lines_reach_strict_one_under_every_variant(gold, tmp_pat
 
 
 # --------------------------------------------------------------------------
-# Byte identity: the json path and the lines `base` path against HEAD.
+# Byte identity: the json path and the lines `base` path against the 0.6.1 pins.
 # --------------------------------------------------------------------------
 
-def test_the_json_contract_and_the_lines_base_path_are_byte_identical_to_head(tmp_path):
-    """No record byte moves for either shipped path (see the module docstring).
+def test_the_json_contract_and_the_lines_base_path_are_byte_stable(tmp_path):
+    """The two shipped paths are pinned to their 0.6.1 bytes.
 
     Two canned runs on the same tiny workbook: the json contract (default) and
-    the lines contract at ``base``. Both dumps hash to HEAD's values, and a json
+    the lines contract at ``base``. Both dumps hash to the pins above, and a json
     run that merely NAMES a variant is byte-identical to one that does not --
     the json contract has its own prompt and ignores the field.
     """
@@ -565,13 +582,20 @@ def test_the_json_contract_and_the_lines_base_path_are_byte_identical_to_head(tm
     assert hashes["json-fix1"] == JSON_RECORD_SHA256
 
 
-def test_the_kind_rule_off_dump_matches_head_except_the_version(tmp_path):
-    """A3: with ``kind_rule=False`` the dump equals HEAD's but for the version.
+def test_the_kind_rule_off_dump_matches_head_except_the_0_6_1_moves(tmp_path):
+    """A3: with ``kind_rule=False`` the dump equals HEAD's but for 0.6.1's moves.
 
-    The rule-off record carries ``pipeline_version="5"``; substituting it back to
-    ``"4"`` (HEAD's constant) must reproduce the pre-K1 pins, so the only byte
-    the K1 build moved on an unaffected record is that one field.
+    The rule-off record carries ``pipeline_version="6"`` (both contracts) and,
+    on the lines contract, 0.6.1-C's ``model_declined`` member (a json dump never
+    carries it: the two coverage members are ``omit_if_default`` and a json run
+    omits them, so ``SCHEMA_VERSION`` stays ``"2"``). Substituting
+    ``pipeline_version`` back to ``"4"`` and dropping that one lines-only member
+    must reproduce the pre-K1 pins, so those are the only bytes this release's
+    build moved on this unaffected record (A/B/D touch neither its label nor its
+    answers).
     """
+    from formextract.schema import SCHEMA_VERSION
+
     path = _tiny_workbook(tmp_path / "tiny.xlsx")
     runs = {
         "json": (JSON_RESPONSE, "json", JSON_RECORD_SHA256_PRE_K1),
@@ -584,9 +608,14 @@ def test_the_kind_rule_off_dump_matches_head_except_the_version(tmp_path):
         record = Pipeline(Store(tmp_path / f"off-{name}"), _Client(text), config).run(
             path
         )
-        assert record.pipeline_version == PIPELINE_VERSION == "5"
-        record.pipeline_version = "4"
-        assert _canonical_record_sha(record) == old, name
+        assert record.pipeline_version == PIPELINE_VERSION == "6"
+        assert record.schema_version == SCHEMA_VERSION == "2"
+        dump = _canonical_dump(record)
+        dump["pipeline_version"] = "4"
+        if contract == "lines":
+            for block in dump.get("coverage") or []:
+                block.pop("model_declined", None)
+        assert _canonical_sha_of(dump) == old, name
 
 
 def test_an_unaffected_record_is_byte_identical_rule_on_or_off(tmp_path):
@@ -837,9 +866,12 @@ def test_the_prompt_version_is_not_bumped_by_a_variant():
     from formextract.schema import SCHEMA_VERSION
 
     assert PROMPT_VERSION == "4"
-    # 0.6.0-K1 bumps PIPELINE_VERSION to "5" (the kind rule changes a default
-    # run's fields); the prompt itself is unchanged, so PROMPT_VERSION stays.
-    assert PIPELINE_VERSION == "5"
+    # 0.6.0-K1 bumped PIPELINE_VERSION to "5" (the kind rule changed a default
+    # run's fields); 0.6.1 bumps it to "6" (A/B/D change a default run's output).
+    # SCHEMA_VERSION stays "2": part C's TabCoverage members are omit_if_default
+    # and a json record omits them. The prompt itself is unchanged, so
+    # PROMPT_VERSION stays.
+    assert PIPELINE_VERSION == "6"
     assert SCHEMA_VERSION == "2"
     # the substance: the default variant's prompt, and therefore the default
     # instance key, is HEAD's byte for byte

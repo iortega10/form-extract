@@ -18,6 +18,8 @@ forms, questionnaires) as PDF or XLSX. The pipeline is
   canned (deterministic) LLM, and a harness that scores region types, anchors,
   and field bindings.
 
+Release notes live in [`CHANGELOG.md`](CHANGELOG.md).
+
 ## Install
 
 ```bash
@@ -308,7 +310,7 @@ becomes `text`, or `bool` when the row holds a marker the layout classified. A
 field that already states an answer is left alone. Only a re-derived field's
 `provenance` gains `stated_control_type` (the model's kind) and `kind_rule`
 (`one_option_single`), so every other record serialises byte-identically;
-`SCHEMA_VERSION` stays `"2"`, `PIPELINE_VERSION` is `"5"`. Set `kind_rule=False`
+`SCHEMA_VERSION` stays `"2"`, `PIPELINE_VERSION` is `"6"`. Set `kind_rule=False`
 to leave the model's kind as stated (it still moves the instance cache key). A lone
 checkbox reads as `bool`, whether spelled with the unicode glyphs `□`/`☐` or
 with an ASCII box (`[ ]`, `[x]`, `( )`) at the start of a cell.
@@ -568,6 +570,50 @@ Declare columns that hold reference/tag words (never answers) with
 `PipelineConfig(non_answer_columns=[{"tab": "Checklist*", "column": "Z"}])`. Text in
 those columns is projected as annotations only and is never a marker or an
 option candidate.
+
+## `json` vs `lines`: choosing the output contract
+
+`PipelineConfig.output_contract` picks what the model writes. Both contracts
+resolve the same way; they differ in the response format and in who proposes a
+checkbox mark.
+
+- **`"json"` (the default)** — the 0.5.0 contract: one JSON object of fields per
+  tab. The model states each field's `control_type`, its `options` (each with a
+  `selected` flag) and its `answer`.
+- **`"lines"`** — a compact row-indexed line grammar, one line per field
+  (`kind L=.. O=.. A=..`). The model names *cells* and never states `selected`;
+  the resolver decides every mark. One call per tab, no repair call.
+
+**Who decides a checkbox mark.** Under `json` the model proposes the `selected`
+flags and the resolver may override them (a declared `checkbox_conventions`
+entry, or a unique right-only marker); under `lines` the resolver decides and
+the model only names cells. The `X | label | Option` rules in
+[Checkboxes](#checkboxes) apply to both.
+
+**What `answers` and `options[].selected` mean (after 0.6.1).** In either
+contract `options[].selected` is the resolver's decision. When the resolver
+selects options, `answers` agrees with them — the selected options' texts in
+option order — and the model's own differing claim is kept on
+`provenance.model_answers`. So read `answers` for a `text` field's typed value,
+and `options[].selected` (or `value_raw`) for a select/checkbox field's
+selection.
+
+**Speed.** Latency tracks output tokens, and the line grammar is smaller than
+the JSON object, so `lines` is usually faster: one integrator measured 213 s
+(json) vs 16 s (lines) on one workbook — a single observation, not a benchmark.
+Measure your own tabs; each stored call carries `latency_ms` and `tokens`.
+
+**Prefer `lines`** for a plain checklist when speed or cost matters; keep the
+default `json` when you want the model's own `selected` flags as an independent
+second opinion.
+
+**Strict tabs.** `min_coverage=0.01` makes any eligible tab that binds nothing
+`PARTIAL`, with one error naming the tab. It also flags tabs that are not forms
+— a header strip, a lookup/data table, a small label/value block — so read the
+error as "look here", not "this is broken". The per-tab coverage record also
+carries `model_declined`: `True` when a tab has anchors, the model returned only
+`hdr`/`note`/`skip` dispositions and no field — which separates "the model
+declared this tab non-form" from "anchors present but unbound".
 
 ## Repeated tabs (opt-in reuse)
 

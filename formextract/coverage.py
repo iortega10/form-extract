@@ -101,6 +101,7 @@ def compute_coverage(
     tabs=None,
     non_answer_element_ids=None,
     chunk_info=None,
+    dispositions=None,
 ) -> list[TabCoverage]:
     """Per-tab row coverage for the fields a run actually resolved.
 
@@ -110,10 +111,18 @@ def compute_coverage(
     (ineligible, never ``1.0``). ``chunk_info`` maps a page to the anchor count
     of its largest authoring chunk; absent, ``max_anchors_per_tab`` is the tab's
     own anchor count and ``chunked`` is ``False``.
+
+    ``dispositions`` (0.6.1-C) is the lines contract's ``Disposition`` list, or
+    ``None`` for a run whose contract has no dispositions (json). With a list,
+    each tab also carries ``dispositions`` (the distinct lattice rows its model
+    dispositioned as non-fields) and ``model_declined`` (the tab has anchors, the
+    model returned at least one disposition and no field). With ``None`` both are
+    the "no information" value (``0`` and ``None``). Neither changes any status.
     """
     resolved_ids = _consumed_element_ids(layout, fields)
     non_answer = set(non_answer_element_ids or ())
     chunk_info = chunk_info or {}
+    fields = fields or []
 
     coverage: list[TabCoverage] = []
     for page in _pages(layout, elements_by_id):
@@ -138,6 +147,20 @@ def compute_coverage(
         ]
         unbound_truncated = len(unbound) > UNBOUND_CAP
 
+        if dispositions is None:
+            tab_disposition_rows = 0
+            model_declined: bool | None = None
+        else:
+            tab_dispositions = [d for d in dispositions if d.page == page]
+            tab_disposition_rows = len(
+                {row for d in tab_dispositions for row in d.rows}
+            )
+            model_declined = bool(
+                anchors > 0
+                and tab_dispositions
+                and not any(field.tab == tab for field in fields)
+            )
+
         largest_chunk = chunk_info.get(page)
         coverage.append(
             TabCoverage(
@@ -153,6 +176,8 @@ def compute_coverage(
                 ),
                 unbound=unbound[:UNBOUND_CAP],
                 unbound_truncated=unbound_truncated,
+                dispositions=tab_disposition_rows,
+                model_declined=model_declined,
             )
         )
     return coverage
